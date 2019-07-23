@@ -4,7 +4,8 @@ pub use avro_rs::types::Value as AvroValue;
 use std::borrow::Cow;
 use lazy_static::lazy_static;
 use regex::Regex;
-use odbc_iter::ValueRow;
+use odbc_iter::{DatumAccessError, ColumnType, TryFromRow, Row, TryFromColumn, Column};
+use serde_json::json;
 use std::fmt;
 use std::error::Error;
 use std::ops::Deref;
@@ -23,17 +24,35 @@ lazy_static! {
 #[derive(Debug)]
 pub enum OdbcAvroError {
     NameNormalizationError { orig: String, attempt: String },
+    AvroSchemaError { odbc_schema: Vec<ColumnType>, avro_schema: serde_json::Value, err: String },
+    DatumAccessError(DatumAccessError),
 }
 
 impl fmt::Display for OdbcAvroError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             OdbcAvroError::NameNormalizationError { orig, attempt } => write!(f, "failed to convert {:?} to strict Avro Name (got as far as {:?})", orig, attempt),
+            OdbcAvroError::AvroSchemaError { odbc_schema, avro_schema, err } => write!(f, "converting ODBC schema to Avro schema from: {:?} with JSON: {}: {}", odbc_schema, avro_schema, err),
+            OdbcAvroError::DatumAccessError(_) => write!(f, "error getting datum from ODBC row column"),
         }
     }
 }
 
-impl Error for OdbcAvroError {}
+impl From<DatumAccessError> for OdbcAvroError {
+    fn from(err: DatumAccessError) -> OdbcAvroError {
+        OdbcAvroError::DatumAccessError(err)
+    }
+}
+
+impl Error for OdbcAvroError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            OdbcAvroError::NameNormalizationError { .. } |
+            OdbcAvroError::AvroSchemaError { .. } => None,
+            OdbcAvroError::DatumAccessError(err) => Some(err),
+        }
+    }
+}
 
 /// Represents valid Avro Name as defined by standard
 #[derive(Debug)]
@@ -91,58 +110,125 @@ pub trait ToAvroSchema {
     fn to_avro_schema(&self, name: &str) -> Result<AvroSchema, OdbcAvroError>;
 }
 
-/*
-impl TryFromOdbcSchema for AvroSchema {
-    fn try_from_odbc_schema(odbc_schema: &OdbcSchema) -> Result<Self, Problem> {
-        fn odbc_data_type_to_avro_type(data_type: SqlDataType) -> &'static str {
-            use odbc_sys::SqlDataType::*;
-            match data_type {
-                SQL_EXT_TINYINT |
-                SQL_SMALLINT |
-                SQL_INTEGER |
-                SQL_EXT_BIGINT => "long",
-                SQL_FLOAT |
-                SQL_REAL |
-                SQL_DOUBLE => "double",
-                SQL_VARCHAR |
-                SQL_CHAR |
-                SQL_EXT_WCHAR |
-                SQL_EXT_LONGVARCHAR |
-                SQL_EXT_WVARCHAR |
-                SQL_EXT_WLONGVARCHAR => "string",
-                SQL_EXT_BINARY |
-                SQL_EXT_VARBINARY |
-                SQL_EXT_LONGVARBINARY => "bytes",
-                _ => panic!(format!("got unimplemented SQL data type: {:?}", data_type)),
+impl<'i> ToAvroSchema for &'i [ColumnType] {
+    fn to_avro_schema(&self, name: &str) -> Result<AvroSchema, OdbcAvroError> {
+        fn column_to_avro_type(column_type: &ColumnType) -> &'static str {
+            use odbc_iter::DatumType::*;
+            match column_type.datum_type {
+                Bit => "boolean",
+                Tinyint |
+                Smallint => "int",
+                Bigint => "long",
+                Float => "float",
+                Double => "double",
+                String => "string",
+                Timestamp |
+                Date |
+                Time => "string",
+                _ => panic!(format!("got unimplemented SQL data type: {:?}", column_type)),
             }
         }
 
-        let fields: Value = 
-                odbc_schema.iter().map(|column_descriptor| {
-                    let name = &column_descriptor.name.as_str().to_avro_name_strict()?;
-                    Ok(if column_descriptor.nullable.unwrap_or(true) {
-                        json!({
-                        "name": name,
-                            "type": ["null", odbc_data_type_to_avro_type(column_descriptor.data_type)]
-                        })
-                    } else {
-                        json!({
-                        "name": name,
-                            "type": odbc_data_type_to_avro_type(column_descriptor.data_type)
-                        })
+        let fields: serde_json::Value = self.into_iter().map(|column_type| {
+                let name = AvroName::new_strict(&column_type.name)?;
+                Ok(if column_type.nullable {
+                    json!({
+                    "name": name.as_str(),
+                        "type": ["null", column_to_avro_type(column_type)],
                     })
-                }).collect::<Result<Vec<_>, Problem>>()?.into();
+                } else {
+                    json!({
+                    "name": name.as_str(),
+                        "type": column_to_avro_type(column_type),
+                    })
+                })
+            }).collect::<Result<Vec<_>, OdbcAvroError>>()?.into();
 
         let json_schema = json!({
             "type": "record",
-            "name": "SQLRecord",
+            "name": AvroName::new_strict(name)?.as_str(),
             "fields": fields
         });
 
-        AvroSchema::parse(&json_schema).map_problem().problem_while_with(|| format!("converting ODBC schema to Avro schema from: {:?} with JSON: {}", &odbc_schema, &json_schema))
+        AvroSchema::parse(&json_schema).map_err(|err| OdbcAvroError::AvroSchemaError {
+            odbc_schema: self.to_vec(),
+            avro_schema: json_schema,
+            err: err.to_string(),
+        })
     }
 }
 
+/// Table column represented as AvroValue
+#[derive(Debug)]
+pub struct AvroColumn(pub AvroValue);
+
+impl TryFromColumn for AvroColumn {
+    type Error = OdbcAvroError;
+
+    fn try_from_column<'i, 's, 'c, S>(column: Column<'i, 's, 'c, S>) -> Result<Self, Self::Error> {
+        fn to_avro<'i, 's, 'c, S>(column: Column<'i, 's, 'c, S>) -> Result<Option<AvroValue>, DatumAccessError> {
+            use odbc_iter::DatumType::*;
+            Ok(match column.column_type().datum_type {
+                Bit => column.into_bool()?.map(AvroValue::Boolean),
+                Tinyint => column.into_i8()?.map(|v| AvroValue::Int(v as i32)),
+                Smallint => column.into_i16()?.map(|v| AvroValue::Int(v as i32)),
+                Integer => column.into_i32()?.map(AvroValue::Int),
+                Bigint => column.into_i64()?.map(AvroValue::Long),
+                Float => column.into_f32()?.map(AvroValue::Float),
+                Double => column.into_f64()?.map(AvroValue::Double),
+                String => column.into_string()?.map(AvroValue::String),
+                Timestamp => column.into_timestamp()?.map(|timestamp| {
+                    AvroValue::String(format!(
+                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+                        timestamp.year,
+                        timestamp.month,
+                        timestamp.day,
+                        timestamp.hour,
+                        timestamp.minute,
+                        timestamp.second,
+                        timestamp.fraction / 1_000_000
+                    ))
+                }),
+                Date => column.into_date()?.map(|date| {
+                    AvroValue::String(format!(
+                        "{:04}-{:02}-{:02}", 
+                        date.year, 
+                        date.month, 
+                        date.day
+                    ))
+                }),
+                Time => column.into_time()?.map(|time| {
+                    AvroValue::String(format!(
+                        "{:02}:{:02}:{:02}.{:03}",
+                        time.hour,
+                        time.minute,
+                        time.second,
+                        time.fraction / 1_000_000
+                    ))
+                }),
+            })
+        }
+        Ok(AvroColumn(to_avro(column)?.unwrap_or(AvroValue::Null)))
+    }
+}
+
+/// Table row reporesented as Avro record
+#[derive(Debug)]
+pub struct AvroRowRecord(AvroValue);
+
+impl TryFromRow for AvroRowRecord {
+    type Error = OdbcAvroError;
+
+    fn try_from_row<'r, 's, 'c, S>(mut row: Row<'r, 's, 'c, S>) -> Result<Self, Self::Error> {
+        let mut fields = Vec::with_capacity(row.columns() as usize);
+        while let Some(column) = row.shift_column()  {
+            fields.push((column.column_type().name.clone(), AvroColumn::try_from_column(column)?.0))
+        }
+        Ok(AvroRowRecord(AvroValue::Record(fields)))
+    }
+}
+
+/*
 // THIS IS NOT FINE - I should be working with AvroSchema here or I will need to convert to_avro_name for every row!
 impl TryFromRow for AvroValue {
     type Schema = AvroSchema;
@@ -239,133 +325,123 @@ mod test {
         AvroName::new_strict("12.3").or_failed_to("convert empty string to Avro Name");
     }
 
-/*
     mod odbc {
         use super::*;
-        use self::AvroValue::*;
+        use assert_matches::assert_matches;
+        use odbc_iter::Odbc;
+
+        fn connection_string() -> String {
+            std::env::var("DB_CONNECTION_STRING").expect("no DB_CONNECTION_STRING env set")
+        }
 
         #[test]
         fn test_hive_multiple_rows() {
-            let odbc = Odbc::env().or_failed_to("open ODBC");
-            let hive = Odbc::connect(&odbc, hive_connection_string().as_str()).or_failed_to("connect to Hive");
-            let data = hive.query::<AvroValue>("SELECT explode(x) AS foo1 FROM (SELECT array(42, 24) AS x) d;")
+            let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to Hive");
+            let mut db = connection.handle();
+            let data = db.query::<AvroRowRecord>("SELECT CAST(42 AS BIGINT) AS foo1 UNION SELECT CAST(24 AS BIGINT) AS foo1;")
                 .or_failed_to("failed to run query")
-                .collect::<Result<Vec<_>, Problem>>()
-                .or_failed_to("fetch data");
+                .or_failed_to("fetch data")
+                .map(|r| r.0)
+                .collect::<Vec<AvroValue>>();
 
-            assert_matches!(data[0], AvroValue::Record(ref fields) => {
-                assert_matches!(fields[0], (ref name, Union(Some(ref value))) => {
+            assert_matches!(&data[0], AvroValue::Record(fields) => {
+                assert_matches!(&fields[0], (name, AvroValue::Long(value)) => {
                     assert_eq!(name, "foo1");
-                    assert_eq!(**value, Long(42));
+                    assert_eq!(*value, 42);
                 });
             });
-            assert_matches!(data[1], AvroValue::Record(ref fields) => {
-                assert_matches!(fields[0], (ref name, Union(Some(ref value))) => {
+            assert_matches!(&data[1], AvroValue::Record(fields) => {
+                assert_matches!(&fields[0], (name, AvroValue::Long(value)) => {
                     assert_eq!(name, "foo1");
-                    assert_eq!(**value, Long(24));
+                    assert_eq!(*value, 24);
                 });
             });
         }
 
         #[test]
         fn test_hive_multiple_columns() {
-            let odbc = Odbc::env().or_failed_to("open ODBC");
-            let hive = Odbc::connect(&odbc, hive_connection_string().as_str()).or_failed_to("connect to Hive");
-            let data = hive.query::<AvroValue>("SELECT 42 AS foo1, 24 AS foo2;")
-                .or_failed_to("failed to run query")
-                .collect::<Result<Vec<_>, Problem>>()
-                .or_failed_to("fetch data");
+            let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to Hive");
+            let mut db = connection.handle();
 
-            assert_matches!(data[0], AvroValue::Record(ref fields) => {
-                assert_matches!(fields[0], (ref name, Union(Some(ref value))) => {
+            let data = db.query::<AvroRowRecord>("SELECT CAST(42 AS BIGINT) AS foo1, CAST(24 AS BIGINT) AS foo2;")
+                .or_failed_to("failed to run query")
+                .or_failed_to("fetch data")
+                .map(|r| r.0)
+                .collect::<Vec<AvroValue>>();
+
+            assert_matches!(&data[0], AvroValue::Record(fields) => {
+                assert_matches!(&fields[0], (name, AvroValue::Long(value)) => {
                     assert_eq!(name, "foo1");
-                    assert_eq!(**value, Long(42));
+                    assert_eq!(*value, 42);
                 });
-                assert_matches!(fields[1], (ref name, Union(Some(ref value))) => {
+                assert_matches!(&fields[1], (name, AvroValue::Long(value)) => {
                     assert_eq!(name, "foo2");
-                    assert_eq!(**value, Long(24));
+                    assert_eq!(*value, 24);
                 });
             });
         }
 
         #[test]
         fn test_hive_types_string() {
-            let odbc = Odbc::env().or_failed_to("open ODBC");
-            let hive = Odbc::connect(&odbc, hive_connection_string().as_str()).or_failed_to("connect to Hive");
-            let data = hive.query::<AvroValue>("SELECT cast('foo' AS STRING) AS foo1, cast('bar' AS VARCHAR) AS foo2;")
-                .or_failed_to("failed to run query")
-                .collect::<Result<Vec<_>, Problem>>()
-                .or_failed_to("fetch data");
+            let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to Hive");
+            let mut db = connection.handle();
 
-            assert_matches!(data[0], AvroValue::Record(ref fields) => {
-                assert_matches!(fields[0], (ref name, Union(Some(ref value))) => {
+            let data = db.query::<AvroRowRecord>("SELECT cast('foo' AS TEXT) AS foo1, cast('bar' AS VARCHAR) AS foo2;")
+                .or_failed_to("failed to run query")
+                .or_failed_to("fetch data")
+                .map(|r| r.0)
+                .collect::<Vec<AvroValue>>();
+
+            assert_matches!(&data[0], AvroValue::Record(fields) => {
+                assert_matches!(&fields[0], (name, AvroValue::String(value)) => {
                     assert_eq!(name, "foo1");
-                    assert_eq!(**value, String("foo".into()));
+                    assert_eq!(value, "foo");
                 });
-                assert_matches!(fields[1], (ref name, Union(Some(ref value))) => {
+                assert_matches!(&fields[1], (name, AvroValue::String(value)) => {
                     assert_eq!(name, "foo2");
-                    assert_eq!(**value, String("bar".into()));
+                    assert_eq!(value, "bar");
                 });
             });
         }
 
         #[test]
         fn test_hive_types_float() {
-            let odbc = Odbc::env().or_failed_to("open ODBC");
-            let hive = Odbc::connect(&odbc, hive_connection_string().as_str()).or_failed_to("connect to Hive");
-            let data = hive.query::<AvroValue>("SELECT cast(1.5 AS FLOAT) AS foo1, cast(2.5 AS DOUBLE) AS foo2;")
-                .or_failed_to("failed to run query")
-                .collect::<Result<Vec<_>, Problem>>()
-                .or_failed_to("fetch data");
+            let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to Hive");
+            let mut db = connection.handle();
 
-            assert_matches!(data[0], AvroValue::Record(ref fields) => {
-                assert_matches!(fields[0], (ref name, Union(Some(ref value))) => {
+            let data = db.query::<AvroRowRecord>("SELECT CAST(1.5 AS FLOAT) AS foo1, CAST(2.5 AS float(53)) AS foo2;")
+                .or_failed_to("failed to run query")
+                .or_failed_to("fetch data")
+                .map(|r| r.0)
+                .collect::<Vec<AvroValue>>();
+
+            assert_matches!(&data[0], AvroValue::Record(fields) => {
+                assert_matches!(&fields[0], (name, AvroValue::Double(number)) => {
                     assert_eq!(name, "foo1");
-                    assert_matches!(**value, Double(number) => assert!(number > 1.0 && number < 2.0));
+                    assert!(*number > 1.0 && *number < 2.0);
                 });
-                assert_matches!(fields[1], (ref name, Union(Some(ref value))) => {
+                assert_matches!(&fields[1], (name, AvroValue::Double(number)) => {
                     assert_eq!(name, "foo2");
-                    assert_matches!(**value, Double(number) => assert!(number > 2.0 && number < 3.0));
+                    assert!(*number > 2.0 && *number < 3.0);
                 });
             });
         }
 
         #[test]
         fn test_hive_types_null() {
-            let odbc = Odbc::env().or_failed_to("open ODBC");
-            let hive = Odbc::connect(&odbc, hive_connection_string().as_str()).or_failed_to("connect to Hive");
-            let data = hive.query::<AvroValue>("SELECT cast(NULL AS FLOAT) AS foo1, cast(NULL AS DOUBLE) AS foo2;")
+            let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to Hive");
+            let mut db = connection.handle();
+
+            let data = db.query::<AvroRowRecord>("SELECT CAST(NULL AS FLOAT) AS foo1, CAST(NULL AS float(53)) AS foo2;")
                 .or_failed_to("failed to run query")
-                .collect::<Result<Vec<_>, Problem>>()
-                .or_failed_to("fetch data");
+                .or_failed_to("fetch data")
+                .map(|r| r.0)
+                .collect::<Vec<AvroValue>>();
 
             assert_matches!(data[0], AvroValue::Record(ref fields) => {
-                assert_matches!(fields[0], (ref name, Union(None)) => assert_eq!(name, "foo1"));
-                assert_matches!(fields[1], (ref name, Union(None)) => assert_eq!(name, "foo2"));
+                assert_matches!(&fields[0], (name, AvroValue::Null) => assert_eq!(name, "foo1"));
+                assert_matches!(&fields[1], (name, AvroValue::Null) => assert_eq!(name, "foo2"));
             });
         }
-
-        #[test]
-        fn test_report_db_not_null() {
-            let odbc = Odbc::env().or_failed_to("open ODBC");
-            let report_db = Odbc::connect(&odbc, report_db_connection_string().as_str()).or_failed_to("connect to Hive");
-            let data = report_db.query::<AvroValue>("SELECT 42 AS foo1, 24 AS foo2;")
-                .or_failed_to("failed to run query")
-                .collect::<Result<Vec<_>, Problem>>()
-                .or_failed_to("fetch data");
-
-            assert_matches!(data[0], AvroValue::Record(ref fields) => {
-                assert_matches!(fields[0], (ref name, Long(value)) => {
-                    assert_eq!(name, "foo1");
-                    assert_eq!(value, 42);
-                });
-                assert_matches!(fields[1], (ref name, Long(value)) => {
-                    assert_eq!(name, "foo2");
-                    assert_eq!(value, 24);
-                });
-            });
-        }
-
     }
-    */
 }
