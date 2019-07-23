@@ -4,11 +4,13 @@ pub use avro_rs::types::Value as AvroValue;
 use std::borrow::Cow;
 use lazy_static::lazy_static;
 use regex::Regex;
-use odbc_iter::{DatumAccessError, ColumnType, TryFromRow, Row, TryFromColumn, Column};
+use odbc_iter::{DatumAccessError, DataAccessError, ColumnType, TryFromRow, Row, TryFromColumn, Column};
+use odbc_iter::ResultSet;
 use serde_json::json;
 use std::fmt;
 use std::error::Error;
 use std::ops::Deref;
+use std::io::Write;
 
 lazy_static! { 
     /// Avro Name as defined by standard
@@ -26,6 +28,8 @@ pub enum OdbcAvroError {
     NameNormalizationError { orig: String, attempt: String },
     AvroSchemaError { odbc_schema: Vec<ColumnType>, avro_schema: serde_json::Value, err: String },
     DatumAccessError(DatumAccessError),
+    DataAccessError(DataAccessError),
+    WriteError(String),
 }
 
 impl fmt::Display for OdbcAvroError {
@@ -33,7 +37,9 @@ impl fmt::Display for OdbcAvroError {
         match self {
             OdbcAvroError::NameNormalizationError { orig, attempt } => write!(f, "failed to convert {:?} to strict Avro Name (got as far as {:?})", orig, attempt),
             OdbcAvroError::AvroSchemaError { odbc_schema, avro_schema, err } => write!(f, "converting ODBC schema to Avro schema from: {:?} with JSON: {}: {}", odbc_schema, avro_schema, err),
+            OdbcAvroError::WriteError(err) => write!(f, "failed to write Avor data: {}", err),
             OdbcAvroError::DatumAccessError(_) => write!(f, "error getting datum from ODBC row column"),
+            OdbcAvroError::DataAccessError(_) => write!(f, "error getting data from ODBC row"),
         }
     }
 }
@@ -44,12 +50,20 @@ impl From<DatumAccessError> for OdbcAvroError {
     }
 }
 
+impl From<DataAccessError> for OdbcAvroError {
+    fn from(err: DataAccessError) -> OdbcAvroError {
+        OdbcAvroError::DataAccessError(err)
+    }
+}
+
 impl Error for OdbcAvroError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             OdbcAvroError::NameNormalizationError { .. } |
-            OdbcAvroError::AvroSchemaError { .. } => None,
+            OdbcAvroError::AvroSchemaError { .. } |
+            OdbcAvroError::WriteError { .. } => None,
             OdbcAvroError::DatumAccessError(err) => Some(err),
+            OdbcAvroError::DataAccessError(err) => Some(err),
         }
     }
 }
@@ -228,74 +242,23 @@ impl TryFromRow for AvroRowRecord {
     }
 }
 
-/*
-// THIS IS NOT FINE - I should be working with AvroSchema here or I will need to convert to_avro_name for every row!
-impl TryFromRow for AvroValue {
-    type Schema = AvroSchema;
-    fn try_from_row(values: Values, schema: &AvroSchema) -> Result<Self, Problem> {
-        if let AvroSchema::Record { fields, .. } = schema {
-            Ok(AvroValue::Record(
-                fields.iter().zip(values).map(|(record_field, value)| {
-                    let name = record_field.name.clone();
-                    let value = match value {
-                        Value::Null => AvroValue::Null,
-                        Value::Bool(value) => AvroValue::Boolean(value),
-                        Value::Number(value) => {
-                            if value.is_i64() {
-                                AvroValue::Long(value.as_i64().unwrap())
-                            } else if value.is_u64() {
-                                AvroValue::Long(value.as_u64().unwrap() as i64) // TODO: this can overflow
-                            } else if value.is_f64() {
-                                AvroValue::Double(value.as_f64().unwrap())
-                            } else {
-                                panic!(format!("JSON Value Numbe from ODBC row is not supported: {:?}", value))
-                            }
-                        },
-                        Value::String(value) => AvroValue::String(value),
-                        // TODO: perhaps I shoud use custom Value object for ODBC since not all data types are going to be used anyway
-                        Value::Array(_) => panic!("got JSON Value Array from ODBC row"),
-                        Value::Object(_) => panic!("got JSON Value Object from ODBC row"),
-                    };
+pub fn write_avro<'c, 'h, S>(result_set: ResultSet<'c, 'h, AvroRowRecord, S>, mut writer: impl Write) -> Result<(), OdbcAvroError> {
+    use avro_rs::{Writer, Codec};
+    use std::io::BufWriter;
 
-                    // Nullable are represented as Union type (["null", type])
-                    let value = if let AvroSchema::Union(_) = record_field.schema {
-                        if let AvroValue::Null = value {
-                            AvroValue::Union(None)
-                        } else {
-                            AvroValue::Union(Some(Box::new(value)))
-                        }
-                    } else {
-                        value
-                    };
+    //NOTE: we need convert Values (Vec<Value>) to Avro Value (Record) to avoid going through JSON::Value as it will serialize as Avro Map and not as Record
+    let mut stdout = BufWriter::new(writer);
+    let avro_schema = result_set.schema().to_avro_schema("ResultSet")?;
+    let mut writer = Writer::with_codec(&avro_schema, stdout, Codec::Deflate);
 
-                    (name, value)
-                }).collect()
-            ))
-        } else {
-            panic!("non Record Avro schemas are not supported");
-        }
-    }
+    result_set.try_fold(0, |bytes, record| {
+            writer.append(record?.0).map(|written| bytes + written).map_err(|err| OdbcAvroError::WriteError(err.to_string()))
+        })
+        .and_then(|_| writer.flush().map_err(|err| OdbcAvroError::WriteError(err.to_string())))?;
+
+    writer.flush().map_err(|err| OdbcAvroError::WriteError(err.to_string()))?;
+    Ok(())
 }
-
-pub trait ToAvroRecord {
-    fn to_avro_record(self, schema: &AvroSchema) -> Result<AvroValue, Problem>;
-}
-
-impl ToAvroRecord for Value {
-    fn to_avro_record(self, _schema: &AvroSchema) -> Result<AvroValue, Problem> {
-        // TODO: check with schema
-        match self {
-            Value::Object(items) => {
-                Ok(AvroValue::Record(items
-                    .into_iter()
-                    .map(|(key, value)| (key, value.avro()))
-                    .collect::<_>()))
-            },
-            _ => Err(Problem::cause("JSON Value is not an object"))
-        }
-    }
-}
-*/
 
 #[cfg(test)]
 mod test {
