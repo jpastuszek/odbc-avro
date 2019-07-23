@@ -7,6 +7,7 @@ use regex::Regex;
 use odbc_iter::ValueRow;
 use std::fmt;
 use std::error::Error;
+use std::ops::Deref;
 
 lazy_static! { 
     /// Avro Name as defined by standard
@@ -34,34 +35,21 @@ impl fmt::Display for OdbcAvroError {
 
 impl Error for OdbcAvroError {}
 
-pub trait ToAvroSchema {
-    fn to_avro_schema(&self, name: &str) -> Result<AvroSchema, OdbcAvroError>;
-}
+/// Represents valid Avro Name as defined by standard
+#[derive(Debug)]
+pub struct AvroName<'i>(Cow<'i, str>);
 
-pub trait ToAvroName<'i> {
-    fn to_avro_name_strict(self) -> Result<Cow<'i, str>, OdbcAvroError>;
-}
-
-pub trait IsAvroName {
-    fn is_avro_name_strict(&self) -> bool;
-    fn is_avro_name(&self) -> bool;
-}
-
-impl IsAvroName for str {
-    fn is_avro_name_strict(&self) -> bool {
-        IS_AVRO_NAME_STRICT.is_match(self)
-    }
-
-    fn is_avro_name(&self) -> bool {
-        IS_AVRO_NAME.is_match(self)
+impl fmt::Display for AvroName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
     }
 }
 
-impl<'i, T> ToAvroName<'i> for T where T: Into<Cow<'i, str>> {
-    fn to_avro_name_strict(self) -> Result<Cow<'i, str>, OdbcAvroError> {
-        let orig: Cow<str> = self.into(); 
-        if (&orig).is_avro_name_strict() {
-            return Ok(orig)
+impl<'i> AvroName<'i> {
+    pub fn new_strict(name: impl Into<Cow<'i, str>>) -> Result<AvroName<'i>, OdbcAvroError> {
+        let orig: Cow<str> = name.into(); 
+        if Self::is_avro_name_strict(&orig) {
+            return Ok(AvroName(orig))
         }
 
         let name = SPLIT_AVRO_NAME.captures_iter(&orig)
@@ -71,12 +59,36 @@ impl<'i, T> ToAvroName<'i> for T where T: Into<Cow<'i, str>> {
             .collect::<Vec<_>>()
             .join("_");
 
-        if !name.as_str().is_avro_name_strict() {
+        if !Self::is_avro_name_strict(&name) {
             return Err(OdbcAvroError::NameNormalizationError { orig: orig.into_owned(), attempt: name })
         }
 
-        Ok(Cow::Owned(name))
+        Ok(AvroName(Cow::Owned(name)))
     }
+
+    pub fn is_avro_name_strict(name: &str) -> bool {
+        IS_AVRO_NAME_STRICT.is_match(name)
+    }
+
+    pub fn is_avro_name(name: &str) -> bool {
+        IS_AVRO_NAME.is_match(name)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'i> Deref for AvroName<'i> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub trait ToAvroSchema {
+    fn to_avro_schema(&self, name: &str) -> Result<AvroSchema, OdbcAvroError>;
 }
 
 /*
@@ -206,25 +218,25 @@ mod test {
 
     #[test]
     fn test_to_avro_name() {
-        assert_eq!("21dOd#Foo.BarBaz-quixISO9823Fro21Do.324".to_avro_name_strict().unwrap(), "d_od_foo_bar_baz_quix_iso9823_fro21_do_324");
-        assert_eq!("foobar".to_avro_name_strict().unwrap(), "foobar");
-        assert_eq!("123foobar".to_avro_name_strict().unwrap(), "foobar");
-        assert_eq!("123.456foobar".to_avro_name_strict().unwrap(), "foobar");
-        assert_eq!("cuml.pct".to_avro_name_strict().unwrap(), "cuml_pct");
+        assert_eq!(AvroName::new_strict("21dOd#Foo.BarBaz-quixISO9823Fro21Do.324").unwrap().as_str(), "d_od_foo_bar_baz_quix_iso9823_fro21_do_324");
+        assert_eq!(AvroName::new_strict("foobar").unwrap().as_str(), "foobar");
+        assert_eq!(AvroName::new_strict("123foobar").unwrap().as_str(), "foobar");
+        assert_eq!(AvroName::new_strict("123.456foobar").unwrap().as_str(), "foobar");
+        assert_eq!(AvroName::new_strict("cuml.pct").unwrap().as_str(), "cuml_pct");
         // strict
-        assert_eq!("FooBar".to_avro_name_strict().unwrap(), "foo_bar");
+        assert_eq!(AvroName::new_strict("FooBar").unwrap().as_str(), "foo_bar");
     }
 
     #[test]
     #[should_panic(expected = "Failed to convert empty string to Avro Name due to: failed to convert \"\" to strict Avro Name (got as far as \"\")")]
     fn test_to_avro_empty() {
-        "".to_avro_name_strict().or_failed_to("convert empty string to Avro Name");
+        AvroName::new_strict("").or_failed_to("convert empty string to Avro Name");
     }
 
     #[test]
     #[should_panic(expected = "Failed to convert empty string to Avro Name due to: failed to convert \"12.3\" to strict Avro Name (got as far as \"\"")]
     fn test_to_avro_number() {
-        "12.3".to_avro_name_strict().or_failed_to("convert empty string to Avro Name");
+        AvroName::new_strict("12.3").or_failed_to("convert empty string to Avro Name");
     }
 
 /*
