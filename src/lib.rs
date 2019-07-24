@@ -121,18 +121,18 @@ impl<'i> Deref for AvroName<'i> {
 }
 
 pub trait ToAvroSchema {
-    fn to_avro_schema(&self, name: &str) -> Result<AvroSchema, OdbcAvroError>;
+    fn to_avro_schema<'n>(&self, name: &'n str) -> Result<AvroSchema, OdbcAvroError>;
 }
 
 impl<'i> ToAvroSchema for &'i [ColumnType] {
-    fn to_avro_schema(&self, name: &str) -> Result<AvroSchema, OdbcAvroError> {
+    fn to_avro_schema<'n>(&self, name: &'n str) -> Result<AvroSchema, OdbcAvroError> {
         fn column_to_avro_type(column_type: &ColumnType) -> &'static str {
             use odbc_iter::DatumType::*;
             match column_type.datum_type {
                 Bit => "boolean",
                 Tinyint |
-                Integer |
-                Smallint => "int",
+                Smallint |
+                Integer => "int",
                 Bigint => "long",
                 Float => "float",
                 Double => "double",
@@ -242,18 +242,20 @@ impl TryFromRow for AvroRowRecord {
     fn try_from_row<'r, 's, 'c, S>(mut row: Row<'r, 's, 'c, S>) -> Result<Self, Self::Error> {
         let mut fields = Vec::with_capacity(row.columns() as usize);
         while let Some(column) = row.shift_column()  {
-            fields.push((column.column_type().name.clone(), AvroColumn::try_from_column(column)?.0))
+            let name = AvroName::new_strict(column.column_type().name.clone())?;
+            let value = AvroColumn::try_from_column(column)?;
+            fields.push((name.0.into_owned(), value.0))
         }
         Ok(AvroRowRecord(AvroValue::Record(fields)))
     }
 }
 
 /// Write query `ResultSet` as `Avro` binary data.
-pub fn write_avro<'h, 'c: 'h, S>(mut result_set: ResultSet<'h, 'c, AvroRowRecord, S>, writer: &mut impl Write, codec: Codec) -> Result<usize, OdbcAvroError> {
+pub fn write_avro<'h, 'c: 'h, 'n, S>(mut result_set: ResultSet<'h, 'c, AvroRowRecord, S>, writer: &mut impl Write, codec: Codec, name: &'n str) -> Result<usize, OdbcAvroError> {
     use std::io::BufWriter;
 
     let stdout = BufWriter::new(writer);
-    let avro_schema = result_set.schema().to_avro_schema("ResultSet")?;
+    let avro_schema = result_set.schema().to_avro_schema(name)?;
     let mut writer = Writer::with_codec(&avro_schema, stdout, codec);
 
     let mut bytes = result_set.try_fold(0, |bytes, record| {
@@ -268,12 +270,12 @@ pub fn write_avro<'h, 'c: 'h, S>(mut result_set: ResultSet<'h, 'c, AvroRowRecord
 /// Extension function for `ResultSet`.
 pub trait WriteAvro {
     /// Write as `Avro` binary data.
-    fn write_avro(self, writer: &mut impl Write, codec: Codec) -> Result<usize, OdbcAvroError>;
+    fn write_avro<'n>(self, writer: &mut impl Write, codec: Codec, name: &'n str) -> Result<usize, OdbcAvroError>;
 }
 
 impl<'h, 'c: 'h, S> WriteAvro for ResultSet<'h, 'c, AvroRowRecord, S> {
-    fn write_avro(self, writer: &mut impl Write, codec: Codec) -> Result<usize, OdbcAvroError> {
-        write_avro(self, writer, codec)
+    fn write_avro<'n>(self, writer: &mut impl Write, codec: Codec, name: &'n str) -> Result<usize, OdbcAvroError> {
+        write_avro(self, writer, codec, name)
     }
 }
 
@@ -362,6 +364,29 @@ mod test {
         }
 
         #[test]
+        fn test_odbc_multiple_columns_normalized_names() {
+            let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to database");
+            let mut db = connection.handle();
+
+            let data = db.query::<AvroRowRecord>("SELECT CAST(42 AS BIGINT) AS FooBar1, CAST(24 AS BIGINT) AS fooBarBaz2;")
+                .or_failed_to("failed to run query")
+                .or_failed_to("fetch data")
+                .map(|r| r.0)
+                .collect::<Vec<AvroValue>>();
+
+            assert_matches!(&data[0], AvroValue::Record(fields) => {
+                assert_matches!(&fields[0], (name, AvroValue::Union(value)) => {
+                    assert_eq!(name, "foo_bar1");
+                    assert_matches!(**value, AvroValue::Long(value) => assert_eq!(value, 42));
+                });
+                assert_matches!(&fields[1], (name, AvroValue::Union(value)) => {
+                    assert_eq!(name, "foo_bar_baz2");
+                    assert_matches!(**value, AvroValue::Long(value) => assert_eq!(value, 24));
+                });
+            });
+        }
+
+        #[test]
         fn test_odbc_types_string() {
             let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle();
@@ -434,11 +459,11 @@ mod test {
         fn test_odbc_avro_write() {
             let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle();
-            let data = db.query("SELECT CAST(42 AS BIGINT) AS foo1 UNION SELECT CAST(24 AS BIGINT) AS foo1;").expect("query failed");
+            let data = db.query("SELECT CAST(42 AS BIGINT) AS FooBar1 UNION SELECT CAST(24 AS BIGINT) AS fooBarBaz2;").expect("query failed");
 
             let mut buf = Vec::new();
 
-            let bytes = write_avro(data, &mut buf, Codec::Deflate).expect("write worked");
+            let bytes = write_avro(data, &mut buf, Codec::Deflate, "result_set").expect("write worked");
             assert!(bytes > 0);
             assert_eq!(bytes, buf.len());
         }
