@@ -192,7 +192,7 @@ impl TryFromColumn for AvroColumn {
                 Float => column.into_f32()?.map(AvroValue::Float),
                 Double => column.into_f64()?.map(AvroValue::Double),
                 String => column.into_string()?.map(AvroValue::String),
-                Json => column.into_json()?.map(|j| AvroValue::String(j.to_string())),
+                Json => column.into_string()?.map(AvroValue::String),
                 Timestamp => column.into_timestamp()?.map(|timestamp| {
                     AvroValue::String(format!(
                         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
