@@ -263,6 +263,18 @@ pub fn write_avro<'h, 'c: 'h, S>(mut result_set: ResultSet<'h, 'c, AvroRowRecord
     Ok(bytes)
 }
 
+/// Extension function for `ResultSet`.
+pub trait WriteAvro {
+    /// Write as `Avro` binary data.
+    fn write_avro(self, writer: &mut impl Write, codec: Codec) -> Result<usize, OdbcAvroError>;
+}
+
+impl<'h, 'c: 'h, S> WriteAvro for ResultSet<'h, 'c, AvroRowRecord, S> {
+    fn write_avro(self, writer: &mut impl Write, codec: Codec) -> Result<usize, OdbcAvroError> {
+        write_avro(self, writer, codec)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
