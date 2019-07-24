@@ -137,7 +137,6 @@ impl<'i> ToAvroSchema for &'i [ColumnType] {
                 Float => "float",
                 Double => "double",
                 String => "string",
-                Json => "string",
                 Timestamp |
                 Date |
                 Time => "string",
@@ -192,7 +191,6 @@ impl TryFromColumn for AvroColumn {
                 Float => column.into_f32()?.map(AvroValue::Float),
                 Double => column.into_f64()?.map(AvroValue::Double),
                 String => column.into_string()?.map(AvroValue::String),
-                Json => column.into_string()?.map(AvroValue::String),
                 Timestamp => column.into_timestamp()?.map(|timestamp| {
                     AvroValue::String(format!(
                         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
