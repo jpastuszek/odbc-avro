@@ -258,13 +258,10 @@ pub fn write_avro<'h, 'c: 'h, 'n, S>(mut result_set: ResultSet<'h, 'c, AvroRowRe
     let avro_schema = result_set.schema().to_avro_schema(name)?;
     let mut writer = Writer::with_codec(&avro_schema, stdout, codec);
 
-    let mut bytes = result_set.try_fold(0, |bytes, record| {
-            writer.append(record?.0).map(|written| bytes + written).map_err(|err| OdbcAvroError::WriteError(err.to_string()))
+    Ok(result_set.try_fold(0, |bytes, record| {
+            writer.append_value_ref(&record?.0).map(|written| bytes + written).map_err(|err| OdbcAvroError::WriteError(err.to_string()))
         })
-        .and_then(|bytes| writer.flush().map(|written| bytes + written).map_err(|err| OdbcAvroError::WriteError(err.to_string())))?;
-
-    bytes += writer.flush().map_err(|err| OdbcAvroError::WriteError(err.to_string()))?;
-    Ok(bytes)
+        .and_then(|bytes| writer.flush().map(|written| bytes + written).map_err(|err| OdbcAvroError::WriteError(err.to_string())))?)
 }
 
 /// Extension function for `ResultSet`.
