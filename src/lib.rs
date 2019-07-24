@@ -222,6 +222,7 @@ impl TryFromColumn for AvroColumn {
                 Double => column.into_f64()?.map(AvroValue::Double),
                 String => column.into_string()?.map(AvroValue::String),
                 Json => column.into_string()?.map(AvroValue::String),
+                //TODO: use milliseconds since epoch as i64?
                 Timestamp => column.into_timestamp()?.map(|timestamp| {
                     AvroValue::String(format!(
                         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
@@ -273,6 +274,8 @@ impl TryFromRow for AvroRowRecord {
     fn try_from_row<'r, 's, 'c, S>(mut row: Row<'r, 's, 'c, S>) -> Result<Self, Self::Error> {
         let mut fields = Vec::with_capacity(row.columns() as usize);
         while let Some(column) = row.shift_column() {
+            //TODO: cache names in thread local? or make ResultSet to be parametised by Schema
+            //type...
             let name = AvroName::new_strict(column.column_type().name.clone())?;
             let value = AvroColumn::try_from_column(column)?;
             fields.push((name.0.into_owned(), value.0))
