@@ -131,15 +131,16 @@ impl<'i> ToAvroSchema for &'i [ColumnType] {
             match column_type.datum_type {
                 Bit => "boolean",
                 Tinyint |
+                Integer |
                 Smallint => "int",
                 Bigint => "long",
                 Float => "float",
                 Double => "double",
                 String => "string",
+                Json => "string",
                 Timestamp |
                 Date |
                 Time => "string",
-                _ => panic!(format!("got unimplemented SQL data type: {:?}", column_type)),
             }
         }
 
@@ -191,6 +192,7 @@ impl TryFromColumn for AvroColumn {
                 Float => column.into_f32()?.map(AvroValue::Float),
                 Double => column.into_f64()?.map(AvroValue::Double),
                 String => column.into_string()?.map(AvroValue::String),
+                Json => column.into_json()?.map(|j| AvroValue::String(j.to_string())),
                 Timestamp => column.into_timestamp()?.map(|timestamp| {
                     AvroValue::String(format!(
                         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
