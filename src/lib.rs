@@ -1,16 +1,18 @@
 pub use avro_rs::schema::Schema as AvroSchema;
-pub use avro_rs::{Writer, Codec};
 pub use avro_rs::types::Value as AvroValue;
-use std::borrow::Cow;
+pub use avro_rs::{Codec, Writer};
 use lazy_static::lazy_static;
-use regex::Regex;
-use odbc_iter::{DatumAccessError, DataAccessError, ColumnType, TryFromRow, Row, TryFromColumn, Column};
 use odbc_iter::ResultSet;
+use odbc_iter::{
+    Column, ColumnType, DataAccessError, DatumAccessError, Row, TryFromColumn, TryFromRow,
+};
+use regex::Regex;
 use serde_json::json;
-use std::fmt;
+use std::borrow::Cow;
 use std::error::Error;
-use std::ops::Deref;
+use std::fmt;
 use std::io::Write;
+use std::ops::Deref;
 
 lazy_static! {
     /// Avro Name as defined by standard
@@ -25,8 +27,15 @@ lazy_static! {
 
 #[derive(Debug)]
 pub enum OdbcAvroError {
-    NameNormalizationError { orig: String, attempt: String },
-    AvroSchemaError { odbc_schema: Vec<ColumnType>, avro_schema: serde_json::Value, err: String },
+    NameNormalizationError {
+        orig: String,
+        attempt: String,
+    },
+    AvroSchemaError {
+        odbc_schema: Vec<ColumnType>,
+        avro_schema: serde_json::Value,
+        err: String,
+    },
     DatumAccessError(DatumAccessError),
     DataAccessError(DataAccessError),
     WriteError(String),
@@ -35,10 +44,24 @@ pub enum OdbcAvroError {
 impl fmt::Display for OdbcAvroError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            OdbcAvroError::NameNormalizationError { orig, attempt } => write!(f, "failed to convert {:?} to strict Avro Name (got as far as {:?})", orig, attempt),
-            OdbcAvroError::AvroSchemaError { odbc_schema, avro_schema, err } => write!(f, "converting ODBC schema to Avro schema from: {:?} with JSON: {}: {}", odbc_schema, avro_schema, err),
+            OdbcAvroError::NameNormalizationError { orig, attempt } => write!(
+                f,
+                "failed to convert {:?} to strict Avro Name (got as far as {:?})",
+                orig, attempt
+            ),
+            OdbcAvroError::AvroSchemaError {
+                odbc_schema,
+                avro_schema,
+                err,
+            } => write!(
+                f,
+                "converting ODBC schema to Avro schema from: {:?} with JSON: {}: {}",
+                odbc_schema, avro_schema, err
+            ),
             OdbcAvroError::WriteError(err) => write!(f, "failed to write Avor data: {}", err),
-            OdbcAvroError::DatumAccessError(_) => write!(f, "error getting datum from ODBC row column"),
+            OdbcAvroError::DatumAccessError(_) => {
+                write!(f, "error getting datum from ODBC row column")
+            }
             OdbcAvroError::DataAccessError(_) => write!(f, "error getting data from ODBC row"),
         }
     }
@@ -59,9 +82,9 @@ impl From<DataAccessError> for OdbcAvroError {
 impl Error for OdbcAvroError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            OdbcAvroError::NameNormalizationError { .. } |
-            OdbcAvroError::AvroSchemaError { .. } |
-            OdbcAvroError::WriteError { .. } => None,
+            OdbcAvroError::NameNormalizationError { .. }
+            | OdbcAvroError::AvroSchemaError { .. }
+            | OdbcAvroError::WriteError { .. } => None,
             OdbcAvroError::DatumAccessError(err) => Some(err),
             OdbcAvroError::DataAccessError(err) => Some(err),
         }
@@ -82,10 +105,11 @@ impl<'i> AvroName<'i> {
     pub fn new_strict(name: impl Into<Cow<'i, str>>) -> Result<AvroName<'i>, OdbcAvroError> {
         let orig: Cow<str> = name.into();
         if Self::is_avro_name_strict(&orig) {
-            return Ok(AvroName(orig))
+            return Ok(AvroName(orig));
         }
 
-        let name = SPLIT_AVRO_NAME.captures_iter(&orig)
+        let name = SPLIT_AVRO_NAME
+            .captures_iter(&orig)
             .flat_map(|m| m.get(1))
             .map(|m| m.as_str().to_string().to_lowercase())
             .skip_while(|m| STARTS_WITH_NUMBER.is_match(m))
@@ -93,7 +117,10 @@ impl<'i> AvroName<'i> {
             .join("_");
 
         if !Self::is_avro_name_strict(&name) {
-            return Err(OdbcAvroError::NameNormalizationError { orig: orig.into_owned(), attempt: name })
+            return Err(OdbcAvroError::NameNormalizationError {
+                orig: orig.into_owned(),
+                attempt: name,
+            });
         }
 
         Ok(AvroName(Cow::Owned(name)))
@@ -130,21 +157,19 @@ impl<'i> ToAvroSchema for &'i [ColumnType] {
             use odbc_iter::DatumType::*;
             match column_type.datum_type {
                 Bit => "boolean",
-                Tinyint |
-                Smallint |
-                Integer => "int",
+                Tinyint | Smallint | Integer => "int",
                 Bigint => "long",
                 Float => "float",
                 Double => "double",
                 String => "string",
                 Json => "string",
-                Timestamp |
-                Date |
-                Time => "string",
+                Timestamp | Date | Time => "string",
             }
         }
 
-        let fields: serde_json::Value = self.into_iter().map(|column_type| {
+        let fields: serde_json::Value = self
+            .into_iter()
+            .map(|column_type| {
                 let name = AvroName::new_strict(&column_type.name)?;
                 Ok(if column_type.nullable {
                     json!({
@@ -157,7 +182,9 @@ impl<'i> ToAvroSchema for &'i [ColumnType] {
                         "type": column_to_avro_type(column_type),
                     })
                 })
-            }).collect::<Result<Vec<_>, OdbcAvroError>>()?.into();
+            })
+            .collect::<Result<Vec<_>, OdbcAvroError>>()?
+            .into();
 
         let json_schema = json!({
             "type": "record",
@@ -181,7 +208,9 @@ impl TryFromColumn for AvroColumn {
     type Error = OdbcAvroError;
 
     fn try_from_column<'i, 's, 'c, S>(column: Column<'i, 's, 'c, S>) -> Result<Self, Self::Error> {
-        fn to_avro<'i, 's, 'c, S>(column: Column<'i, 's, 'c, S>) -> Result<Option<AvroValue>, DatumAccessError> {
+        fn to_avro<'i, 's, 'c, S>(
+            column: Column<'i, 's, 'c, S>,
+        ) -> Result<Option<AvroValue>, DatumAccessError> {
             use odbc_iter::DatumType::*;
             Ok(match column.column_type().datum_type {
                 Bit => column.into_bool()?.map(AvroValue::Boolean),
@@ -208,9 +237,7 @@ impl TryFromColumn for AvroColumn {
                 Date => column.into_date()?.map(|date| {
                     AvroValue::String(format!(
                         "{:04}-{:02}-{:02}",
-                        date.year,
-                        date.month,
-                        date.day
+                        date.year, date.month, date.day
                     ))
                 }),
                 Time => column.into_time()?.map(|time| {
@@ -225,9 +252,13 @@ impl TryFromColumn for AvroColumn {
             })
         }
         if column.column_type().nullable {
-            Ok(AvroColumn(AvroValue::Union(Box::new(to_avro(column)?.unwrap_or(AvroValue::Null)))))
+            Ok(AvroColumn(AvroValue::Union(Box::new(
+                to_avro(column)?.unwrap_or(AvroValue::Null),
+            ))))
         } else {
-            Ok(AvroColumn(to_avro(column)?.expect("not-nullable column but got NULL")))
+            Ok(AvroColumn(
+                to_avro(column)?.expect("not-nullable column but got NULL"),
+            ))
         }
     }
 }
@@ -241,7 +272,7 @@ impl TryFromRow for AvroRowRecord {
 
     fn try_from_row<'r, 's, 'c, S>(mut row: Row<'r, 's, 'c, S>) -> Result<Self, Self::Error> {
         let mut fields = Vec::with_capacity(row.columns() as usize);
-        while let Some(column) = row.shift_column()  {
+        while let Some(column) = row.shift_column() {
             let name = AvroName::new_strict(column.column_type().name.clone())?;
             let value = AvroColumn::try_from_column(column)?;
             fields.push((name.0.into_owned(), value.0))
@@ -251,27 +282,51 @@ impl TryFromRow for AvroRowRecord {
 }
 
 /// Write query `ResultSet` as `Avro` binary data.
-pub fn write_avro<'h, 'c: 'h, 'n, S>(mut result_set: ResultSet<'h, 'c, AvroRowRecord, S>, writer: &mut impl Write, codec: Codec, name: &'n str) -> Result<usize, OdbcAvroError> {
+pub fn write_avro<'h, 'c: 'h, 'n, S>(
+    mut result_set: ResultSet<'h, 'c, AvroRowRecord, S>,
+    writer: &mut impl Write,
+    codec: Codec,
+    name: &'n str,
+) -> Result<usize, OdbcAvroError> {
     use std::io::BufWriter;
 
     let stdout = BufWriter::new(writer);
     let avro_schema = result_set.schema().to_avro_schema(name)?;
     let mut writer = Writer::with_codec(&avro_schema, stdout, codec);
 
-    Ok(result_set.try_fold(0, |bytes, record| {
-            writer.append_value_ref(&record?.0).map(|written| bytes + written).map_err(|err| OdbcAvroError::WriteError(err.to_string()))
+    Ok(result_set
+        .try_fold(0, |bytes, record| {
+            writer
+                .append_value_ref(&record?.0)
+                .map(|written| bytes + written)
+                .map_err(|err| OdbcAvroError::WriteError(err.to_string()))
         })
-        .and_then(|bytes| writer.flush().map(|written| bytes + written).map_err(|err| OdbcAvroError::WriteError(err.to_string())))?)
+        .and_then(|bytes| {
+            writer
+                .flush()
+                .map(|written| bytes + written)
+                .map_err(|err| OdbcAvroError::WriteError(err.to_string()))
+        })?)
 }
 
 /// Extension function for `ResultSet`.
 pub trait WriteAvro {
     /// Write as `Avro` binary data.
-    fn write_avro<'n>(self, writer: &mut impl Write, codec: Codec, name: &'n str) -> Result<usize, OdbcAvroError>;
+    fn write_avro<'n>(
+        self,
+        writer: &mut impl Write,
+        codec: Codec,
+        name: &'n str,
+    ) -> Result<usize, OdbcAvroError>;
 }
 
 impl<'h, 'c: 'h, S> WriteAvro for ResultSet<'h, 'c, AvroRowRecord, S> {
-    fn write_avro<'n>(self, writer: &mut impl Write, codec: Codec, name: &'n str) -> Result<usize, OdbcAvroError> {
+    fn write_avro<'n>(
+        self,
+        writer: &mut impl Write,
+        codec: Codec,
+        name: &'n str,
+    ) -> Result<usize, OdbcAvroError> {
         write_avro(self, writer, codec, name)
     }
 }
@@ -283,23 +338,41 @@ mod test {
 
     #[test]
     fn test_to_avro_name() {
-        assert_eq!(AvroName::new_strict("21dOd#Foo.BarBaz-quixISO9823Fro21Do.324").unwrap().as_str(), "d_od_foo_bar_baz_quix_iso9823_fro21_do_324");
+        assert_eq!(
+            AvroName::new_strict("21dOd#Foo.BarBaz-quixISO9823Fro21Do.324")
+                .unwrap()
+                .as_str(),
+            "d_od_foo_bar_baz_quix_iso9823_fro21_do_324"
+        );
         assert_eq!(AvroName::new_strict("foobar").unwrap().as_str(), "foobar");
-        assert_eq!(AvroName::new_strict("123foobar").unwrap().as_str(), "foobar");
-        assert_eq!(AvroName::new_strict("123.456foobar").unwrap().as_str(), "foobar");
-        assert_eq!(AvroName::new_strict("cuml.pct").unwrap().as_str(), "cuml_pct");
+        assert_eq!(
+            AvroName::new_strict("123foobar").unwrap().as_str(),
+            "foobar"
+        );
+        assert_eq!(
+            AvroName::new_strict("123.456foobar").unwrap().as_str(),
+            "foobar"
+        );
+        assert_eq!(
+            AvroName::new_strict("cuml.pct").unwrap().as_str(),
+            "cuml_pct"
+        );
         // strict
         assert_eq!(AvroName::new_strict("FooBar").unwrap().as_str(), "foo_bar");
     }
 
     #[test]
-    #[should_panic(expected = "Failed to convert empty string to Avro Name due to: failed to convert \"\" to strict Avro Name (got as far as \"\")")]
+    #[should_panic(
+        expected = "Failed to convert empty string to Avro Name due to: failed to convert \"\" to strict Avro Name (got as far as \"\")"
+    )]
     fn test_to_avro_empty() {
         AvroName::new_strict("").or_failed_to("convert empty string to Avro Name");
     }
 
     #[test]
-    #[should_panic(expected = "Failed to convert empty string to Avro Name due to: failed to convert \"12.3\" to strict Avro Name (got as far as \"\"")]
+    #[should_panic(
+        expected = "Failed to convert empty string to Avro Name due to: failed to convert \"12.3\" to strict Avro Name (got as far as \"\""
+    )]
     fn test_to_avro_number() {
         AvroName::new_strict("12.3").or_failed_to("convert empty string to Avro Name");
     }
@@ -315,9 +388,13 @@ mod test {
 
         #[test]
         fn test_odbc_multiple_rows() {
-            let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to database");
+            let mut connection =
+                Odbc::connect(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle();
-            let data = db.query::<AvroRowRecord>("SELECT CAST(42 AS BIGINT) AS foo1 UNION SELECT CAST(24 AS BIGINT) AS foo1;")
+            let data = db
+                .query::<AvroRowRecord>(
+                    "SELECT CAST(42 AS BIGINT) AS foo1 UNION SELECT CAST(24 AS BIGINT) AS foo1;",
+                )
                 .or_failed_to("failed to run query")
                 .or_failed_to("fetch data")
                 .map(|r| r.0)
@@ -339,10 +416,14 @@ mod test {
 
         #[test]
         fn test_odbc_multiple_columns() {
-            let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to database");
+            let mut connection =
+                Odbc::connect(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle();
 
-            let data = db.query::<AvroRowRecord>("SELECT CAST(42 AS BIGINT) AS foo1, CAST(24 AS BIGINT) AS foo2;")
+            let data = db
+                .query::<AvroRowRecord>(
+                    "SELECT CAST(42 AS BIGINT) AS foo1, CAST(24 AS BIGINT) AS foo2;",
+                )
                 .or_failed_to("failed to run query")
                 .or_failed_to("fetch data")
                 .map(|r| r.0)
@@ -362,10 +443,14 @@ mod test {
 
         #[test]
         fn test_odbc_multiple_columns_normalized_names() {
-            let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to database");
+            let mut connection =
+                Odbc::connect(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle();
 
-            let data = db.query::<AvroRowRecord>("SELECT CAST(42 AS BIGINT) AS FooBar1, CAST(24 AS BIGINT) AS fooBarBaz2;")
+            let data = db
+                .query::<AvroRowRecord>(
+                    "SELECT CAST(42 AS BIGINT) AS FooBar1, CAST(24 AS BIGINT) AS fooBarBaz2;",
+                )
                 .or_failed_to("failed to run query")
                 .or_failed_to("fetch data")
                 .map(|r| r.0)
@@ -385,10 +470,14 @@ mod test {
 
         #[test]
         fn test_odbc_types_string() {
-            let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to database");
+            let mut connection =
+                Odbc::connect(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle();
 
-            let data = db.query::<AvroRowRecord>("SELECT cast('foo' AS TEXT) AS foo1, cast('bar' AS VARCHAR) AS foo2;")
+            let data = db
+                .query::<AvroRowRecord>(
+                    "SELECT cast('foo' AS TEXT) AS foo1, cast('bar' AS VARCHAR) AS foo2;",
+                )
                 .or_failed_to("failed to run query")
                 .or_failed_to("fetch data")
                 .map(|r| r.0)
@@ -408,10 +497,14 @@ mod test {
 
         #[test]
         fn test_odbc_types_float() {
-            let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to database");
+            let mut connection =
+                Odbc::connect(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle();
 
-            let data = db.query::<AvroRowRecord>("SELECT CAST(1.5 AS FLOAT) AS foo1, CAST(2.5 AS float(53)) AS foo2;")
+            let data = db
+                .query::<AvroRowRecord>(
+                    "SELECT CAST(1.5 AS FLOAT) AS foo1, CAST(2.5 AS float(53)) AS foo2;",
+                )
                 .or_failed_to("failed to run query")
                 .or_failed_to("fetch data")
                 .map(|r| r.0)
@@ -431,10 +524,14 @@ mod test {
 
         #[test]
         fn test_odbc_types_null() {
-            let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to database");
+            let mut connection =
+                Odbc::connect(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle();
 
-            let data = db.query::<AvroRowRecord>("SELECT CAST(NULL AS FLOAT) AS foo1, CAST(NULL AS float(53)) AS foo2;")
+            let data = db
+                .query::<AvroRowRecord>(
+                    "SELECT CAST(NULL AS FLOAT) AS foo1, CAST(NULL AS float(53)) AS foo2;",
+                )
                 .or_failed_to("failed to run query")
                 .or_failed_to("fetch data")
                 .map(|r| r.0)
@@ -454,13 +551,15 @@ mod test {
 
         #[test]
         fn test_odbc_avro_write() {
-            let mut connection = Odbc::connect(&connection_string()).or_failed_to("connect to database");
+            let mut connection =
+                Odbc::connect(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle();
             let data = db.query("SELECT CAST(42 AS BIGINT) AS FooBar1 UNION SELECT CAST(24 AS BIGINT) AS fooBarBaz2;").expect("query failed");
 
             let mut buf = Vec::new();
 
-            let bytes = write_avro(data, &mut buf, Codec::Deflate, "result_set").expect("write worked");
+            let bytes =
+                write_avro(data, &mut buf, Codec::Deflate, "result_set").expect("write worked");
             assert!(bytes > 0);
             assert_eq!(bytes, buf.len());
         }
