@@ -4,7 +4,7 @@ pub use avro_rs::{Codec, Writer};
 use lazy_static::lazy_static;
 use odbc_iter::ResultSet;
 use odbc_iter::{
-    Column, ColumnType, DataAccessError, DatumAccessError, Row, TryFromColumn, TryFromRow,
+    Column, ColumnType, DataAccessError, DatumAccessError, Row, TryFromColumn, TryFromRow, Configuration
 };
 use regex::Regex;
 use serde_json::json;
@@ -14,7 +14,6 @@ use std::error::Error;
 use std::fmt;
 use std::io::{Write, BufWriter};
 use std::ops::Deref;
-use std::marker::PhantomData;
 
 lazy_static! {
     /// Avro Name as defined by standard
@@ -203,7 +202,7 @@ impl<'i> ToAvroSchema for &'i [ColumnType] {
 }
 
 /// How JSON column data is reformatted
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum JsonReformat {
     /// Strip spaces and new lines
     Compact,
@@ -212,7 +211,7 @@ pub enum JsonReformat {
 }
 
 /// In what format TIMESTAMP columns should be stored in the output
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TimestampFormat {
     /// As `String` in format: Y-M-D H:M:S.fff
     DefaultString,
@@ -220,37 +219,40 @@ pub enum TimestampFormat {
     MillisecondsSinceEpoch,
 }
 
-pub trait Configuration: Default {
-    #[inline(always)]
-    fn reformat_json(&self) -> Option<JsonReformat> {
-        None
-    }
+/// Default configuration with no JSON reformatting and storing timestamp as String
+#[derive(Debug, Clone)]
+pub struct AvroConfiguration {
+    json_reformat: Option<JsonReformat>,
+    timestamp_format: TimestampFormat,
+}
 
-    #[inline(always)]
-    fn timestamp_format(&self) -> TimestampFormat {
-        TimestampFormat::DefaultString
+impl Configuration for AvroConfiguration {}
+
+impl Default for AvroConfiguration {
+    fn default() -> AvroConfiguration {
+        AvroConfiguration {
+            json_reformat: None,
+            timestamp_format: TimestampFormat::DefaultString,
+        }
     }
 }
 
-/// Default configuration with no JSON reformatting and storing timestamp as String
-#[derive(Debug, Default)]
-pub struct DefaultConfiguration;
-impl Configuration for DefaultConfiguration {}
-
 /// Table column represented as AvroValue
 #[derive(Debug)]
-pub struct AvroColumn<C: Configuration = DefaultConfiguration>(pub AvroValue, PhantomData<C>);
+pub struct AvroColumn(pub AvroValue);
 
-impl<C: Configuration> TryFromColumn for AvroColumn<C> {
+impl TryFromColumn<AvroConfiguration> for AvroColumn {
     type Error = OdbcAvroError;
 
-    fn try_from_column<'i, 's, 'c, S>(column: Column<'i, 's, 'c, S>) -> Result<Self, Self::Error> {
+    fn try_from_column<'i, 's, 'c, S>(column: Column<'i, 's, 'c, S, AvroConfiguration>) -> Result<Self, Self::Error> {
         #[inline(always)]
-        fn to_avro<'i, 's, 'c, C: Configuration, S>(
-            column: Column<'i, 's, 'c, S>,
-            configuration: C,
+        fn to_avro<'i, 's, 'c, S>(
+            column: Column<'i, 's, 'c, S, AvroConfiguration>,
         ) -> Result<Option<AvroValue>, DatumAccessError> {
             use odbc_iter::DatumType::*;
+            let json_reformat = column.options().configuration.json_reformat.clone();
+            let timestamp_format = column.options().configuration.timestamp_format.clone();
+
             Ok(match column.column_type().datum_type {
                 Bit => column.into_bool()?.map(AvroValue::Boolean),
                 Tinyint => column.into_i8()?.map(|v| AvroValue::Int(v as i32)),
@@ -261,14 +263,14 @@ impl<C: Configuration> TryFromColumn for AvroColumn<C> {
                 Double => column.into_f64()?.map(AvroValue::Double),
                 String => column.into_string()?.map(AvroValue::String),
                 Json => {
-                    match configuration.reformat_json() {
+                    match json_reformat {
                         Some(JsonReformat::Compact) => column.into_json()?.map(|j| AvroValue::String(serde_json::to_string(&j).unwrap())),
                         Some(JsonReformat::Pretty) => column.into_json()?.map(|j| AvroValue::String(serde_json::to_string_pretty(&j).unwrap())),
                         None => column.into_string()?.map(AvroValue::String),
                     }
                 }
                 Timestamp => column.into_timestamp()?.map(|timestamp| {
-                    match configuration.timestamp_format() {
+                    match timestamp_format {
                         TimestampFormat::DefaultString => AvroValue::String(format!(
                             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
                             timestamp.year,
@@ -312,16 +314,13 @@ impl<C: Configuration> TryFromColumn for AvroColumn<C> {
                 }),
             })
         }
-        let configuration = C::default();
         if column.column_type().nullable {
             Ok(AvroColumn(
-                AvroValue::Union(Box::new(to_avro(column, configuration)?.unwrap_or(AvroValue::Null))),
-                PhantomData,
+                AvroValue::Union(Box::new(to_avro(column)?.unwrap_or(AvroValue::Null))),
             ))
         } else {
             Ok(AvroColumn(
-                to_avro(column, configuration)?.expect("not-nullable column but got NULL"),
-                PhantomData,
+                to_avro(column)?.expect("not-nullable column but got NULL"),
             ))
         }
     }
@@ -329,21 +328,21 @@ impl<C: Configuration> TryFromColumn for AvroColumn<C> {
 
 /// Table row represented as Avro record
 #[derive(Debug)]
-pub struct AvroRowRecord<C: Configuration = DefaultConfiguration>(AvroValue, PhantomData<C>);
+pub struct AvroRowRecord(AvroValue);
 
-impl<C: Configuration> TryFromRow for AvroRowRecord<C> {
+impl TryFromRow<AvroConfiguration> for AvroRowRecord {
     type Error = OdbcAvroError;
 
-    fn try_from_row<'r, 's, 'c, S>(mut row: Row<'r, 's, 'c, S>) -> Result<Self, Self::Error> {
+    fn try_from_row<'r, 's, 'c, S>(mut row: Row<'r, 's, 'c, S, AvroConfiguration>) -> Result<Self, Self::Error> {
         let mut fields = Vec::with_capacity(row.columns() as usize);
         while let Some(column) = row.shift_column() {
             //TODO: cache names in thread local? or make ResultSet to be parametised by Schema
             //type...
             let name = AvroName::new_strict(column.column_type().name.clone())?;
-            let value: AvroColumn<C> = AvroColumn::try_from_column(column)?;
+            let value: AvroColumn = AvroColumn::try_from_column(column)?;
             fields.push((name.0.into_owned(), value.0))
         }
-        Ok(AvroRowRecord(AvroValue::Record(fields), PhantomData))
+        Ok(AvroRowRecord(AvroValue::Record(fields)))
     }
 }
 
@@ -358,7 +357,7 @@ pub trait WriteAvro {
     ) -> Result<usize, OdbcAvroError>;
 }
 
-impl<'h, 'c: 'h, C: Configuration, S> WriteAvro for ResultSet<'h, 'c, AvroRowRecord<C>, S> {
+impl<'h, 'c: 'h, S> WriteAvro for ResultSet<'h, 'c, AvroRowRecord, S, AvroConfiguration> {
     fn write_avro<'n, W: Write>(
         mut self,
         writer: &mut W,
@@ -444,7 +443,7 @@ mod test {
         fn test_odbc_multiple_rows() {
             let mut connection =
                 Odbc::connect(&connection_string()).or_failed_to("connect to database");
-            let mut db = connection.handle();
+            let mut db = connection.handle_with_configuration(AvroConfiguration::default());
             let data = db
                 .query::<AvroRowRecord>(
                     "SELECT CAST(42 AS BIGINT) AS foo1 UNION SELECT CAST(24 AS BIGINT) AS foo1;",
@@ -472,7 +471,7 @@ mod test {
         fn test_odbc_multiple_columns() {
             let mut connection =
                 Odbc::connect(&connection_string()).or_failed_to("connect to database");
-            let mut db = connection.handle();
+            let mut db = connection.handle_with_configuration(AvroConfiguration::default());
 
             let data = db
                 .query::<AvroRowRecord>(
@@ -499,7 +498,7 @@ mod test {
         fn test_odbc_multiple_columns_normalized_names() {
             let mut connection =
                 Odbc::connect(&connection_string()).or_failed_to("connect to database");
-            let mut db = connection.handle();
+            let mut db = connection.handle_with_configuration(AvroConfiguration::default());
 
             let data = db
                 .query::<AvroRowRecord>(
@@ -526,7 +525,7 @@ mod test {
         fn test_odbc_types_string() {
             let mut connection =
                 Odbc::connect(&connection_string()).or_failed_to("connect to database");
-            let mut db = connection.handle();
+            let mut db = connection.handle_with_configuration(AvroConfiguration::default());
 
             let data = db
                 .query::<AvroRowRecord>(
@@ -553,7 +552,7 @@ mod test {
         fn test_odbc_types_float() {
             let mut connection =
                 Odbc::connect(&connection_string()).or_failed_to("connect to database");
-            let mut db = connection.handle();
+            let mut db = connection.handle_with_configuration(AvroConfiguration::default());
 
             let data = db
                 .query::<AvroRowRecord>(
@@ -580,7 +579,7 @@ mod test {
         fn test_odbc_types_null() {
             let mut connection =
                 Odbc::connect(&connection_string()).or_failed_to("connect to database");
-            let mut db = connection.handle();
+            let mut db = connection.handle_with_configuration(AvroConfiguration::default());
 
             let data = db
                 .query::<AvroRowRecord>(
@@ -607,7 +606,7 @@ mod test {
         fn test_odbc_avro_write() {
             let mut connection =
                 Odbc::connect(&connection_string()).or_failed_to("connect to database");
-            let mut db = connection.handle();
+            let mut db = connection.handle_with_configuration(AvroConfiguration::default());
             let data = db.query::<AvroRowRecord>("SELECT CAST(42 AS BIGINT) AS FooBar1 UNION SELECT CAST(24 AS BIGINT) AS fooBarBaz2;").expect("query failed");
 
             let mut buf = Vec::new();
@@ -624,19 +623,11 @@ mod test {
                 std::env::var("MONETDB_ODBC_CONNECTION").expect("no MONETDB_ODBC_CONNECTION env set")
             }
 
-            #[derive(Debug, Default)]
-            pub struct ReformatJsonConfiguration;
-            impl Configuration for ReformatJsonConfiguration {
-                fn reformat_json(&self) -> Option<JsonReformat> {
-                    Some(JsonReformat::Compact)
-                }
-            }
-
             #[test]
             fn test_odbc_avro_write_json_default() {
                 let mut connection =
                     Odbc::connect(&connection_string()).or_failed_to("connect to database");
-                let mut db = connection.handle();
+                let mut db = connection.handle_with_configuration(AvroConfiguration::default());
                 let data = db.query::<AvroRowRecord>(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
 
                 let mut buf = Vec::new();
@@ -652,8 +643,12 @@ mod test {
             fn test_odbc_avro_write_json_reformat() {
                 let mut connection =
                     Odbc::connect(&connection_string()).or_failed_to("connect to database");
-                let mut db = connection.handle();
-                let data = db.query::<AvroRowRecord<ReformatJsonConfiguration>>(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
+                let config = AvroConfiguration {
+                    json_reformat: Some(JsonReformat::Compact),
+                    .. Default::default()
+                };
+                let mut db = connection.handle_with_configuration(config);
+                let data = db.query::<AvroRowRecord>(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
 
                 let mut buf = Vec::new();
 
