@@ -12,7 +12,7 @@ use chrono::NaiveDate;
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
-use std::io::Write;
+use std::io::{Write, BufWriter};
 use std::ops::Deref;
 use std::marker::PhantomData;
 
@@ -347,34 +347,6 @@ impl<C: Configuration> TryFromRow for AvroRowRecord<C> {
     }
 }
 
-/// Write query `ResultSet` as `Avro` binary data.
-pub fn write_avro<'h, 'c: 'h, 'n, C: Configuration, W: Write, S>(
-    mut result_set: ResultSet<'h, 'c, AvroRowRecord<C>, S>,
-    writer: &mut W,
-    codec: Codec,
-    name: &'n str,
-) -> Result<usize, OdbcAvroError> {
-    use std::io::BufWriter;
-
-    let stdout = BufWriter::new(writer);
-    let avro_schema = result_set.schema().to_avro_schema(name)?;
-    let mut writer = Writer::with_codec(&avro_schema, stdout, codec);
-
-    Ok(result_set
-        .try_fold(0, |bytes, record| {
-            writer
-                .append_value_ref(&record?.0)
-                .map(|written| bytes + written)
-                .map_err(|err| OdbcAvroError::WriteError(err.to_string()))
-        })
-        .and_then(|bytes| {
-            writer
-                .flush()
-                .map(|written| bytes + written)
-                .map_err(|err| OdbcAvroError::WriteError(err.to_string()))
-        })?)
-}
-
 /// Extension function for `ResultSet`.
 pub trait WriteAvro {
     /// Write as `Avro` binary data.
@@ -388,12 +360,28 @@ pub trait WriteAvro {
 
 impl<'h, 'c: 'h, C: Configuration, S> WriteAvro for ResultSet<'h, 'c, AvroRowRecord<C>, S> {
     fn write_avro<'n, W: Write>(
-        self,
+        mut self,
         writer: &mut W,
         codec: Codec,
         name: &'n str,
     ) -> Result<usize, OdbcAvroError> {
-        write_avro(self, writer, codec, name)
+        let stdout = BufWriter::new(writer);
+        let avro_schema = self.schema().to_avro_schema(name)?;
+        let mut writer = Writer::with_codec(&avro_schema, stdout, codec);
+
+        Ok(self
+            .try_fold(0, |bytes, record| {
+                writer
+                    .append_value_ref(&record?.0)
+                    .map(|written| bytes + written)
+                    .map_err(|err| OdbcAvroError::WriteError(err.to_string()))
+            })
+            .and_then(|bytes| {
+                writer
+                    .flush()
+                    .map(|written| bytes + written)
+                    .map_err(|err| OdbcAvroError::WriteError(err.to_string()))
+            })?)
     }
 }
 
@@ -620,11 +608,11 @@ mod test {
             let mut connection =
                 Odbc::connect(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle();
-            let data = db.query("SELECT CAST(42 AS BIGINT) AS FooBar1 UNION SELECT CAST(24 AS BIGINT) AS fooBarBaz2;").expect("query failed");
+            let data = db.query::<AvroRowRecord>("SELECT CAST(42 AS BIGINT) AS FooBar1 UNION SELECT CAST(24 AS BIGINT) AS fooBarBaz2;").expect("query failed");
 
             let mut buf = Vec::new();
 
-            let bytes = write_avro::<DefaultConfiguration, _, _>(data, &mut buf, Codec::Deflate, "result_set").expect("write worked");
+            let bytes = data.write_avro(&mut buf, Codec::Deflate, "result_set").expect("write worked");
             assert!(bytes > 0);
             assert_eq!(bytes, buf.len());
         }
@@ -649,11 +637,11 @@ mod test {
                 let mut connection =
                     Odbc::connect(&connection_string()).or_failed_to("connect to database");
                 let mut db = connection.handle();
-                let data = db.query(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
+                let data = db.query::<AvroRowRecord>(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
 
                 let mut buf = Vec::new();
 
-                write_avro::<DefaultConfiguration, _, _>(data, &mut buf, Codec::Null, "result_set").expect("write worked");
+                data.write_avro(&mut buf, Codec::Null, "result_set").expect("write worked");
 
                 // find string in binary output
                 let json = r#"{ "foo": 42 }"#.as_bytes();
@@ -665,11 +653,11 @@ mod test {
                 let mut connection =
                     Odbc::connect(&connection_string()).or_failed_to("connect to database");
                 let mut db = connection.handle();
-                let data = db.query(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
+                let data = db.query::<AvroRowRecord<ReformatJsonConfiguration>>(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
 
                 let mut buf = Vec::new();
 
-                write_avro::<ReformatJsonConfiguration, _, _>(data, &mut buf, Codec::Null, "result_set").expect("write worked");
+                data.write_avro(&mut buf, Codec::Null, "result_set").expect("write worked");
 
                 // find string in binary output
                 let json = r#"{"foo":42}"#.as_bytes();
