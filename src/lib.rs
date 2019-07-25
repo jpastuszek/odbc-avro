@@ -328,7 +328,7 @@ impl<C: Configuration> TryFromColumn for AvroColumn<C> {
     }
 }
 
-/// Table row reporesented as Avro record
+/// Table row represented as Avro record
 #[derive(Debug)]
 pub struct AvroRowRecord<C: Configuration = DefaultConfiguration>(AvroValue, PhantomData<C>);
 
