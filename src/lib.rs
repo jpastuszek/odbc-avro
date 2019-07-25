@@ -8,11 +8,13 @@ use odbc_iter::{
 };
 use regex::Regex;
 use serde_json::json;
+use chrono::NaiveDate;
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
 use std::io::Write;
 use std::ops::Deref;
+use std::marker::PhantomData;
 
 lazy_static! {
     /// Avro Name as defined by standard
@@ -200,16 +202,53 @@ impl<'i> ToAvroSchema for &'i [ColumnType] {
     }
 }
 
+/// How JSON column data is reformatted
+#[derive(Debug)]
+pub enum JsonReformat {
+    /// Strip spaces and new lines
+    Compact,
+    /// Indented for readability
+    Pretty,
+}
+
+/// In what format TIMESTAMP columns should be stored in the output
+#[derive(Debug)]
+pub enum TimestampFormat {
+    /// As `String` in format: Y-M-D H:M:S.fff
+    DefaultString,
+    /// As `i64` number of milliseconds since epoch
+    MillisecondsSinceEpoch,
+}
+
+pub trait Configuration: Default {
+    #[inline(always)]
+    fn reformat_json(&self) -> Option<JsonReformat> {
+        None
+    }
+
+    #[inline(always)]
+    fn timestamp_format(&self) -> TimestampFormat {
+        TimestampFormat::DefaultString
+    }
+}
+
+/// Default configuration with no JSON reformatting and storing timestamp as String
+#[derive(Debug, Default)]
+pub struct DefaultConfiguration;
+impl Configuration for DefaultConfiguration {}
+
 /// Table column represented as AvroValue
 #[derive(Debug)]
-pub struct AvroColumn(pub AvroValue);
+pub struct AvroColumn<C: Configuration = DefaultConfiguration>(pub AvroValue, PhantomData<C>);
 
-impl TryFromColumn for AvroColumn {
+impl<C: Configuration> TryFromColumn for AvroColumn<C> {
     type Error = OdbcAvroError;
 
     fn try_from_column<'i, 's, 'c, S>(column: Column<'i, 's, 'c, S>) -> Result<Self, Self::Error> {
-        fn to_avro<'i, 's, 'c, S>(
+        #[inline(always)]
+        fn to_avro<'i, 's, 'c, C: Configuration, S>(
             column: Column<'i, 's, 'c, S>,
+            configuration: C,
         ) -> Result<Option<AvroValue>, DatumAccessError> {
             use odbc_iter::DatumType::*;
             Ok(match column.column_type().datum_type {
@@ -221,19 +260,41 @@ impl TryFromColumn for AvroColumn {
                 Float => column.into_f32()?.map(AvroValue::Float),
                 Double => column.into_f64()?.map(AvroValue::Double),
                 String => column.into_string()?.map(AvroValue::String),
-                Json => column.into_string()?.map(AvroValue::String),
+                Json => {
+                    match configuration.reformat_json() {
+                        Some(JsonReformat::Compact) => column.into_json()?.map(|j| AvroValue::String(serde_json::to_string(&j).unwrap())),
+                        Some(JsonReformat::Pretty) => column.into_json()?.map(|j| AvroValue::String(serde_json::to_string_pretty(&j).unwrap())),
+                        None => column.into_string()?.map(AvroValue::String),
+                    }
+                }
                 //TODO: use milliseconds since epoch as i64?
                 Timestamp => column.into_timestamp()?.map(|timestamp| {
-                    AvroValue::String(format!(
-                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-                        timestamp.year,
-                        timestamp.month,
-                        timestamp.day,
-                        timestamp.hour,
-                        timestamp.minute,
-                        timestamp.second,
-                        timestamp.fraction / 1_000_000
-                    ))
+                    match configuration.timestamp_format() {
+                        TimestampFormat::DefaultString => AvroValue::String(format!(
+                            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+                            timestamp.year,
+                            timestamp.month,
+                            timestamp.day,
+                            timestamp.hour,
+                            timestamp.minute,
+                            timestamp.second,
+                            timestamp.fraction / 1_000_000
+                        )),
+                        TimestampFormat::MillisecondsSinceEpoch => {
+                            let date_time = NaiveDate::from_ymd(
+                                    i32::from(timestamp.year),
+                                    u32::from(timestamp.month),
+                                    u32::from(timestamp.day),
+                                )
+                                .and_hms_nano(
+                                    u32::from(timestamp.hour),
+                                    u32::from(timestamp.minute),
+                                    u32::from(timestamp.second),
+                                    timestamp.fraction,
+                                );
+                            AvroValue::Long(date_time.timestamp_millis())
+                        },
+                    }
                 }),
                 Date => column.into_date()?.map(|date| {
                     AvroValue::String(format!(
@@ -252,13 +313,16 @@ impl TryFromColumn for AvroColumn {
                 }),
             })
         }
+        let configuration = C::default();
         if column.column_type().nullable {
-            Ok(AvroColumn(AvroValue::Union(Box::new(
-                to_avro(column)?.unwrap_or(AvroValue::Null),
-            ))))
+            Ok(AvroColumn(
+                AvroValue::Union(Box::new(to_avro(column, configuration)?.unwrap_or(AvroValue::Null))),
+                PhantomData,
+            ))
         } else {
             Ok(AvroColumn(
-                to_avro(column)?.expect("not-nullable column but got NULL"),
+                to_avro(column, configuration)?.expect("not-nullable column but got NULL"),
+                PhantomData,
             ))
         }
     }
@@ -266,9 +330,9 @@ impl TryFromColumn for AvroColumn {
 
 /// Table row reporesented as Avro record
 #[derive(Debug)]
-pub struct AvroRowRecord(AvroValue);
+pub struct AvroRowRecord<C: Configuration = DefaultConfiguration>(AvroValue, PhantomData<C>);
 
-impl TryFromRow for AvroRowRecord {
+impl<C: Configuration> TryFromRow for AvroRowRecord<C> {
     type Error = OdbcAvroError;
 
     fn try_from_row<'r, 's, 'c, S>(mut row: Row<'r, 's, 'c, S>) -> Result<Self, Self::Error> {
@@ -277,17 +341,17 @@ impl TryFromRow for AvroRowRecord {
             //TODO: cache names in thread local? or make ResultSet to be parametised by Schema
             //type...
             let name = AvroName::new_strict(column.column_type().name.clone())?;
-            let value = AvroColumn::try_from_column(column)?;
+            let value: AvroColumn<C> = AvroColumn::try_from_column(column)?;
             fields.push((name.0.into_owned(), value.0))
         }
-        Ok(AvroRowRecord(AvroValue::Record(fields)))
+        Ok(AvroRowRecord(AvroValue::Record(fields), PhantomData))
     }
 }
 
 /// Write query `ResultSet` as `Avro` binary data.
-pub fn write_avro<'h, 'c: 'h, 'n, S>(
-    mut result_set: ResultSet<'h, 'c, AvroRowRecord, S>,
-    writer: &mut impl Write,
+pub fn write_avro<'h, 'c: 'h, 'n, C: Configuration, W: Write, S>(
+    mut result_set: ResultSet<'h, 'c, AvroRowRecord<C>, S>,
+    writer: &mut W,
     codec: Codec,
     name: &'n str,
 ) -> Result<usize, OdbcAvroError> {
@@ -315,18 +379,18 @@ pub fn write_avro<'h, 'c: 'h, 'n, S>(
 /// Extension function for `ResultSet`.
 pub trait WriteAvro {
     /// Write as `Avro` binary data.
-    fn write_avro<'n>(
+    fn write_avro<'n, W: Write>(
         self,
-        writer: &mut impl Write,
+        writer: &mut W,
         codec: Codec,
         name: &'n str,
     ) -> Result<usize, OdbcAvroError>;
 }
 
-impl<'h, 'c: 'h, S> WriteAvro for ResultSet<'h, 'c, AvroRowRecord, S> {
-    fn write_avro<'n>(
+impl<'h, 'c: 'h, C: Configuration, S> WriteAvro for ResultSet<'h, 'c, AvroRowRecord<C>, S> {
+    fn write_avro<'n, W: Write>(
         self,
-        writer: &mut impl Write,
+        writer: &mut W,
         codec: Codec,
         name: &'n str,
     ) -> Result<usize, OdbcAvroError> {
@@ -561,10 +625,57 @@ mod test {
 
             let mut buf = Vec::new();
 
-            let bytes =
-                write_avro(data, &mut buf, Codec::Deflate, "result_set").expect("write worked");
+            let bytes = write_avro::<DefaultConfiguration, _, _>(data, &mut buf, Codec::Deflate, "result_set").expect("write worked");
             assert!(bytes > 0);
             assert_eq!(bytes, buf.len());
+        }
+
+        mod monetdb {
+            use super::*;
+
+            fn connection_string() -> String {
+                std::env::var("MONETDB_ODBC_CONNECTION").expect("no MONETDB_ODBC_CONNECTION env set")
+            }
+
+            #[derive(Debug, Default)]
+            pub struct ReformatJsonConfiguration;
+            impl Configuration for ReformatJsonConfiguration {
+                fn reformat_json(&self) -> Option<JsonReformat> {
+                    Some(JsonReformat::Compact)
+                }
+            }
+
+            #[test]
+            fn test_odbc_avro_write_json_default() {
+                let mut connection =
+                    Odbc::connect(&connection_string()).or_failed_to("connect to database");
+                let mut db = connection.handle();
+                let data = db.query(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
+
+                let mut buf = Vec::new();
+
+                write_avro::<DefaultConfiguration, _, _>(data, &mut buf, Codec::Null, "result_set").expect("write worked");
+
+                // find string in binary output
+                let json = r#"{ "foo": 42 }"#.as_bytes();
+                assert!(buf.windows(json.len()).any(|w| w == json))
+            }
+
+            #[test]
+            fn test_odbc_avro_write_json_reformat() {
+                let mut connection =
+                    Odbc::connect(&connection_string()).or_failed_to("connect to database");
+                let mut db = connection.handle();
+                let data = db.query(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
+
+                let mut buf = Vec::new();
+
+                write_avro::<ReformatJsonConfiguration, _, _>(data, &mut buf, Codec::Null, "result_set").expect("write worked");
+
+                // find string in binary output
+                let json = r#"{"foo":42}"#.as_bytes();
+                assert!(buf.windows(json.len()).any(|w| w == json))
+            }
         }
     }
 }
