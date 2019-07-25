@@ -267,7 +267,6 @@ impl<C: Configuration> TryFromColumn for AvroColumn<C> {
                         None => column.into_string()?.map(AvroValue::String),
                     }
                 }
-                //TODO: use milliseconds since epoch as i64?
                 Timestamp => column.into_timestamp()?.map(|timestamp| {
                     match configuration.timestamp_format() {
                         TimestampFormat::DefaultString => AvroValue::String(format!(
