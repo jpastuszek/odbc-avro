@@ -150,7 +150,7 @@ impl<'i> Deref for AvroName<'i> {
 
 /// How JSON column data is reformatted
 #[derive(Debug, Clone)]
-pub enum JsonReformat {
+pub enum ReformatJson {
     /// Strip spaces and new lines
     Compact,
     /// Indented for readability
@@ -169,7 +169,7 @@ pub enum TimestampFormat {
 /// Default configuration with no JSON reformatting and storing timestamp as String
 #[derive(Debug, Clone)]
 pub struct AvroConfiguration {
-    pub json_reformat: Option<JsonReformat>,
+    pub reformat_json: Option<ReformatJson>,
     pub timestamp_format: TimestampFormat,
 }
 
@@ -178,7 +178,7 @@ impl Configuration for AvroConfiguration {}
 impl Default for AvroConfiguration {
     fn default() -> AvroConfiguration {
         AvroConfiguration {
-            json_reformat: None,
+            reformat_json: None,
             timestamp_format: TimestampFormat::DefaultString,
         }
     }
@@ -197,7 +197,7 @@ impl TryFromColumn<AvroConfiguration> for AvroColumn {
             column: Column<'i, 's, 'c, S, AvroConfiguration>,
         ) -> Result<Option<AvroValue>, DatumAccessError> {
             use odbc_iter::DatumType::*;
-            let json_reformat = column.configuration.json_reformat.clone();
+            let reformat_json = column.configuration.reformat_json.clone();
             let timestamp_format = column.configuration.timestamp_format.clone();
 
             Ok(match column.column_type.datum_type {
@@ -210,9 +210,9 @@ impl TryFromColumn<AvroConfiguration> for AvroColumn {
                 Double => column.into_f64()?.map(AvroValue::Double),
                 String => column.into_string()?.map(AvroValue::String),
                 Json => {
-                    match json_reformat {
-                        Some(JsonReformat::Compact) => column.into_json()?.map(|j| AvroValue::String(serde_json::to_string(&j).unwrap())),
-                        Some(JsonReformat::Pretty) => column.into_json()?.map(|j| AvroValue::String(serde_json::to_string_pretty(&j).unwrap())),
+                    match reformat_json {
+                        Some(ReformatJson::Compact) => column.into_json()?.map(|j| AvroValue::String(serde_json::to_string(&j).unwrap())),
+                        Some(ReformatJson::Pretty) => column.into_json()?.map(|j| AvroValue::String(serde_json::to_string_pretty(&j).unwrap())),
                         None => column.into_string()?.map(AvroValue::String),
                     }
                 }
@@ -682,11 +682,11 @@ mod test {
             }
 
             #[test]
-            fn test_odbc_avro_write_json_reformat() {
+            fn test_odbc_avro_write_reformat_json() {
                 let mut connection =
                     Odbc::connect(&connection_string()).or_failed_to("connect to database");
                 let config = AvroConfiguration {
-                    json_reformat: Some(JsonReformat::Compact),
+                    reformat_json: Some(ReformatJson::Compact),
                     .. Default::default()
                 };
                 let mut db = connection.handle_with_configuration(config);
