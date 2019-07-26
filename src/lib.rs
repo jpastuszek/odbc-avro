@@ -446,7 +446,7 @@ mod test {
         #[test]
         fn test_odbc_multiple_rows() {
             let mut connection =
-                Odbc::connect(&connection_string()).or_failed_to("connect to database");
+                Odbc::connect_sync(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle_with_configuration(AvroConfiguration::default());
             let data = db
                 .query::<AvroRowRecord>(
@@ -474,7 +474,7 @@ mod test {
         #[test]
         fn test_odbc_multiple_columns() {
             let mut connection =
-                Odbc::connect(&connection_string()).or_failed_to("connect to database");
+                Odbc::connect_sync(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle_with_configuration(AvroConfiguration::default());
 
             let data = db
@@ -501,7 +501,7 @@ mod test {
         #[test]
         fn test_odbc_multiple_columns_normalized_names() {
             let mut connection =
-                Odbc::connect(&connection_string()).or_failed_to("connect to database");
+                Odbc::connect_sync(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle_with_configuration(AvroConfiguration::default());
 
             let data = db
@@ -528,7 +528,7 @@ mod test {
         #[test]
         fn test_odbc_types_string() {
             let mut connection =
-                Odbc::connect(&connection_string()).or_failed_to("connect to database");
+                Odbc::connect_sync(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle_with_configuration(AvroConfiguration::default());
 
             let data = db
@@ -555,7 +555,7 @@ mod test {
         #[test]
         fn test_odbc_types_float() {
             let mut connection =
-                Odbc::connect(&connection_string()).or_failed_to("connect to database");
+                Odbc::connect_sync(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle_with_configuration(AvroConfiguration::default());
 
             let data = db
@@ -582,7 +582,7 @@ mod test {
         #[test]
         fn test_odbc_types_null() {
             let mut connection =
-                Odbc::connect(&connection_string()).or_failed_to("connect to database");
+                Odbc::connect_sync(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle_with_configuration(AvroConfiguration::default());
 
             let data = db
@@ -609,7 +609,7 @@ mod test {
         #[test]
         fn test_odbc_avro_write() {
             let mut connection =
-                Odbc::connect(&connection_string()).or_failed_to("connect to database");
+                Odbc::connect_sync(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle_with_configuration(AvroConfiguration::default());
             let data = db.query::<AvroRowRecord>("SELECT CAST(42 AS BIGINT) AS FooBar1 UNION SELECT CAST(24 AS BIGINT) AS fooBarBaz2;").expect("query failed");
 
@@ -623,7 +623,7 @@ mod test {
         #[test]
         fn test_odbc_avro_timestamp_string() {
             let mut connection =
-                Odbc::connect(&connection_string()).or_failed_to("connect to database");
+                Odbc::connect_sync(&connection_string()).or_failed_to("connect to database");
 
             let mut db = connection.handle_with_configuration(AvroConfiguration {
                 timestamp_format: TimestampFormat::DefaultString,
@@ -642,7 +642,7 @@ mod test {
         #[test]
         fn test_odbc_avro_timestamp_millis() {
             let mut connection =
-                Odbc::connect(&connection_string()).or_failed_to("connect to database");
+                Odbc::connect_sync(&connection_string()).or_failed_to("connect to database");
 
             let mut db = connection.handle_with_configuration(AvroConfiguration {
                 timestamp_format: TimestampFormat::MillisecondsSinceEpoch,
@@ -668,7 +668,7 @@ mod test {
             #[test]
             fn test_odbc_avro_write_json_default() {
                 let mut connection =
-                    Odbc::connect(&connection_string()).or_failed_to("connect to database");
+                    Odbc::connect_sync(&connection_string()).or_failed_to("connect to database");
                 let mut db = connection.handle_with_configuration(AvroConfiguration::default());
                 let data = db.query::<AvroRowRecord>(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
 
@@ -684,7 +684,7 @@ mod test {
             #[test]
             fn test_odbc_avro_write_json_reformat() {
                 let mut connection =
-                    Odbc::connect(&connection_string()).or_failed_to("connect to database");
+                    Odbc::connect_sync(&connection_string()).or_failed_to("connect to database");
                 let config = AvroConfiguration {
                     json_reformat: Some(JsonReformat::Compact),
                     .. Default::default()
