@@ -250,10 +250,10 @@ impl TryFromColumn<AvroConfiguration> for AvroColumn {
             column: Column<'i, 's, 'c, S, AvroConfiguration>,
         ) -> Result<Option<AvroValue>, DatumAccessError> {
             use odbc_iter::DatumType::*;
-            let json_reformat = column.options().configuration.json_reformat.clone();
-            let timestamp_format = column.options().configuration.timestamp_format.clone();
+            let json_reformat = column.configuration.json_reformat.clone();
+            let timestamp_format = column.configuration.timestamp_format.clone();
 
-            Ok(match column.column_type().datum_type {
+            Ok(match column.column_type.datum_type {
                 Bit => column.into_bool()?.map(AvroValue::Boolean),
                 Tinyint => column.into_i8()?.map(|v| AvroValue::Int(v as i32)),
                 Smallint => column.into_i16()?.map(|v| AvroValue::Int(v as i32)),
@@ -314,7 +314,7 @@ impl TryFromColumn<AvroConfiguration> for AvroColumn {
                 }),
             })
         }
-        if column.column_type().nullable {
+        if column.column_type.nullable {
             Ok(AvroColumn(
                 AvroValue::Union(Box::new(to_avro(column)?.unwrap_or(AvroValue::Null))),
             ))
@@ -338,7 +338,7 @@ impl TryFromRow<AvroConfiguration> for AvroRowRecord {
         while let Some(column) = row.shift_column() {
             //TODO: cache names in thread local? or make ResultSet to be parametised by Schema
             //type...
-            let name = AvroName::new_strict(column.column_type().name.clone())?;
+            let name = AvroName::new_strict(column.column_type.name.clone())?;
             let value: AvroColumn = AvroColumn::try_from_column(column)?;
             fields.push((name.0.into_owned(), value.0))
         }
