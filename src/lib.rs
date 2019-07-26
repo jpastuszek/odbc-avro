@@ -169,8 +169,8 @@ pub enum TimestampFormat {
 /// Default configuration with no JSON reformatting and storing timestamp as String
 #[derive(Debug, Clone)]
 pub struct AvroConfiguration {
-    json_reformat: Option<JsonReformat>,
-    timestamp_format: TimestampFormat,
+    pub json_reformat: Option<JsonReformat>,
+    pub timestamp_format: TimestampFormat,
 }
 
 impl Configuration for AvroConfiguration {}
