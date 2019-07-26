@@ -148,59 +148,6 @@ impl<'i> Deref for AvroName<'i> {
     }
 }
 
-pub trait ToAvroSchema {
-    fn to_avro_schema<'n>(&self, name: &'n str) -> Result<AvroSchema, OdbcAvroError>;
-}
-
-impl<'i> ToAvroSchema for &'i [ColumnType] {
-    fn to_avro_schema<'n>(&self, name: &'n str) -> Result<AvroSchema, OdbcAvroError> {
-        fn column_to_avro_type(column_type: &ColumnType) -> &'static str {
-            use odbc_iter::DatumType::*;
-            match column_type.datum_type {
-                Bit => "boolean",
-                Tinyint | Smallint | Integer => "int",
-                Bigint => "long",
-                Float => "float",
-                Double => "double",
-                String => "string",
-                Json => "string",
-                Timestamp | Date | Time => "string",
-            }
-        }
-
-        let fields: serde_json::Value = self
-            .into_iter()
-            .map(|column_type| {
-                let name = AvroName::new_strict(&column_type.name)?;
-                Ok(if column_type.nullable {
-                    json!({
-                    "name": name.as_str(),
-                        "type": ["null", column_to_avro_type(column_type)],
-                    })
-                } else {
-                    json!({
-                    "name": name.as_str(),
-                        "type": column_to_avro_type(column_type),
-                    })
-                })
-            })
-            .collect::<Result<Vec<_>, OdbcAvroError>>()?
-            .into();
-
-        let json_schema = json!({
-            "type": "record",
-            "name": AvroName::new_strict(name)?.as_str(),
-            "fields": fields
-        });
-
-        AvroSchema::parse(&json_schema).map_err(|err| OdbcAvroError::AvroSchemaError {
-            odbc_schema: self.to_vec(),
-            avro_schema: json_schema,
-            err: err.to_string(),
-        })
-    }
-}
-
 /// How JSON column data is reformatted
 #[derive(Debug, Clone)]
 pub enum JsonReformat {
@@ -347,7 +294,10 @@ impl TryFromRow<AvroConfiguration> for AvroRowRecord {
 }
 
 /// Extension function for `ResultSet`.
-pub trait WriteAvro {
+pub trait AvroResultSet {
+    /// Get `AvroSchema` object from `ResultSet` schema.
+    fn avro_schema<'n>(&self, name: &'n str) -> Result<AvroSchema, OdbcAvroError>;
+        
     /// Write as `Avro` binary data.
     fn write_avro<'n, W: Write>(
         self,
@@ -357,7 +307,61 @@ pub trait WriteAvro {
     ) -> Result<usize, OdbcAvroError>;
 }
 
-impl<'h, 'c: 'h, S> WriteAvro for ResultSet<'h, 'c, AvroRowRecord, S, AvroConfiguration> {
+impl<'h, 'c: 'h, S> AvroResultSet for ResultSet<'h, 'c, AvroRowRecord, S, AvroConfiguration> {
+    fn avro_schema<'n>(&self, name: &'n str) -> Result<AvroSchema, OdbcAvroError> {
+        fn column_to_avro_type(column_type: &ColumnType, configuration: &AvroConfiguration) -> &'static str {
+            use odbc_iter::DatumType::*;
+            match column_type.datum_type {
+                Bit => "boolean",
+                Tinyint | Smallint | Integer => "int",
+                Bigint => "long",
+                Float => "float",
+                Double => "double",
+                String => "string",
+                Json => "string",
+                Timestamp => match configuration.timestamp_format {
+                    TimestampFormat::DefaultString => "string",
+                    TimestampFormat::MillisecondsSinceEpoch => "long",
+                },
+                Date | Time => "string",
+            }
+        }
+
+        let configuration = self.configuration();
+
+        let fields: serde_json::Value = self
+            .schema()
+            .into_iter()
+            .map(|column_type| {
+                let name = AvroName::new_strict(&column_type.name)?;
+                Ok(if column_type.nullable {
+                    json!({
+                    "name": name.as_str(),
+                        "type": ["null", column_to_avro_type(column_type, configuration)],
+                    })
+                } else {
+                    json!({
+                    "name": name.as_str(),
+                        "type": column_to_avro_type(column_type, configuration),
+                    })
+                })
+            })
+            .collect::<Result<Vec<_>, OdbcAvroError>>()?
+            .into();
+
+        let json_schema = json!({
+            "type": "record",
+            "name": AvroName::new_strict(name)?.as_str(),
+            "fields": fields
+        });
+
+        AvroSchema::parse(&json_schema).map_err(|err| OdbcAvroError::AvroSchemaError {
+            odbc_schema: self.schema().to_vec(),
+            avro_schema: json_schema,
+            err: err.to_string(),
+        })
+    }
+
     fn write_avro<'n, W: Write>(
         mut self,
         writer: &mut W,
@@ -365,7 +369,7 @@ impl<'h, 'c: 'h, S> WriteAvro for ResultSet<'h, 'c, AvroRowRecord, S, AvroConfig
         name: &'n str,
     ) -> Result<usize, OdbcAvroError> {
         let stdout = BufWriter::new(writer);
-        let avro_schema = self.schema().to_avro_schema(name)?;
+        let avro_schema = self.avro_schema(name)?;
         let mut writer = Writer::with_codec(&avro_schema, stdout, codec);
 
         Ok(self
@@ -608,6 +612,44 @@ mod test {
                 Odbc::connect(&connection_string()).or_failed_to("connect to database");
             let mut db = connection.handle_with_configuration(AvroConfiguration::default());
             let data = db.query::<AvroRowRecord>("SELECT CAST(42 AS BIGINT) AS FooBar1 UNION SELECT CAST(24 AS BIGINT) AS fooBarBaz2;").expect("query failed");
+
+            let mut buf = Vec::new();
+
+            let bytes = data.write_avro(&mut buf, Codec::Deflate, "result_set").expect("write worked");
+            assert!(bytes > 0);
+            assert_eq!(bytes, buf.len());
+        }
+
+        #[test]
+        fn test_odbc_avro_timestamp_string() {
+            let mut connection =
+                Odbc::connect(&connection_string()).or_failed_to("connect to database");
+
+            let mut db = connection.handle_with_configuration(AvroConfiguration {
+                timestamp_format: TimestampFormat::DefaultString,
+                .. Default::default()
+            });
+
+            let data = db.query::<AvroRowRecord>("SELECT CAST('2019-07-26 10:27:53.702' AS DATETIME) AS tstamp").expect("query failed");
+
+            let mut buf = Vec::new();
+
+            let bytes = data.write_avro(&mut buf, Codec::Deflate, "result_set").expect("write worked");
+            assert!(bytes > 0);
+            assert_eq!(bytes, buf.len());
+        }
+
+        #[test]
+        fn test_odbc_avro_timestamp_millis() {
+            let mut connection =
+                Odbc::connect(&connection_string()).or_failed_to("connect to database");
+
+            let mut db = connection.handle_with_configuration(AvroConfiguration {
+                timestamp_format: TimestampFormat::MillisecondsSinceEpoch,
+                .. Default::default()
+            });
+
+            let data = db.query::<AvroRowRecord>("SELECT CAST('2019-07-26 10:27:53.702' AS DATETIME) AS tstamp").expect("query failed");
 
             let mut buf = Vec::new();
 
