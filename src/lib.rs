@@ -14,6 +14,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{Write, BufWriter};
 use std::ops::Deref;
+use std::cell::RefCell;
 
 lazy_static! {
     /// Avro Name as defined by standard
@@ -166,11 +167,29 @@ pub enum TimestampFormat {
     MillisecondsSinceEpoch,
 }
 
+/// Internal state used to cache row metadata
+#[derive(Debug, Default)]
+pub struct State {
+    /// AvroName compatible column names
+    column_name_cache: Vec<String>,
+}
+
+impl Clone for State {
+    fn clone(&self) -> State {
+        // Start with empty state for next query
+        State::default()
+    }
+}
+
 /// Default configuration with no JSON reformatting and storing timestamp as String
 #[derive(Debug, Clone)]
 pub struct AvroConfiguration {
+    /// How to process JSON columns
     pub reformat_json: Option<ReformatJson>,
+    /// How to store timestamp columns
     pub timestamp_format: TimestampFormat,
+    /// Internal state used to cache row metadata
+    pub state: RefCell<State>,
 }
 
 impl Configuration for AvroConfiguration {}
@@ -180,6 +199,7 @@ impl Default for AvroConfiguration {
         AvroConfiguration {
             reformat_json: None,
             timestamp_format: TimestampFormat::DefaultString,
+            state: Default::default(),
         }
     }
 }
@@ -282,12 +302,24 @@ impl TryFromRow<AvroConfiguration> for AvroRowRecord {
 
     fn try_from_row<'r, 's, 'c, S>(mut row: Row<'r, 's, 'c, S, AvroConfiguration>) -> Result<Self, Self::Error> {
         let mut fields = Vec::with_capacity(row.columns() as usize);
+        let mut state = row.configuration.state.borrow_mut();
+
+        // On first row generate AvroName for each column name and store in AvroConfiguration::state 
+        // so it does not need to be recalculated for following rows.
+        let column_names = if state.column_name_cache.is_empty() {
+            let column_names = row.schema.iter()
+                .map(|s| AvroName::new_strict(&s.name).map(|n| n.0.into_owned()))
+                .collect::<Result<Vec<String>, _>>()?;
+            std::mem::replace(&mut state.column_name_cache, column_names);
+            state.column_name_cache.as_slice()
+        } else {
+            state.column_name_cache.as_slice()
+        };
+
         while let Some(column) = row.shift_column() {
-            //TODO: cache names in thread local? or make ResultSet to be parametised by Schema
-            //type...
-            let name = AvroName::new_strict(column.column_type.name.clone())?;
+            let name = column_names[column.index() as usize].to_owned();
             let value: AvroColumn = AvroColumn::try_from_column(column)?;
-            fields.push((name.0.into_owned(), value.0))
+            fields.push((name, value.0));
         }
         Ok(AvroRowRecord(AvroValue::Record(fields)))
     }
