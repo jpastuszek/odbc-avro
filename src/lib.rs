@@ -20,26 +20,34 @@ lazy_static! {
     /// Avro Name as defined by standard
     static ref IS_AVRO_NAME: Regex = Regex::new("^[A-Za-z][A-Za-z0-9_]*$").unwrap();
     /// Avro Name but only allowing lowercase chars so it plays well with databases
-    static ref IS_AVRO_NAME_STRICT: Regex = Regex::new("^[a-z][a-z0-9_]*$").unwrap();
+    static ref IS_AVRO_NAME_LOWER: Regex = Regex::new("^[a-z][a-z0-9_]*$").unwrap();
     // https://play.rust-lang.org/?gist=c47950efc11c64329aab12151e9afcd4&version=stable&mode=debug&edition=2015
+    /// Split by non alpha-num
+    static ref SPLIT_AVRO_NAME: Regex = Regex::new(r"([A-Za-z]+[0-9]*[a-z]*[0-9]*|[a-z]+|[0-9]+)[^A-Za-z0-9]?").unwrap();
     /// Split by non alpha-num and split CamelCase words
-    static ref SPLIT_AVRO_NAME: Regex = Regex::new(r"([A-Z]+[0-9]*[a-z]*[0-9]*|[a-z]+|[0-9]+)[^A-Za-z0-9]?").unwrap();
+    static ref SPLIT_AVRO_NAME_LOWER: Regex = Regex::new(r"([A-Z]+[0-9]*[a-z]*[0-9]*|[a-z]+|[0-9]+)[^A-Za-z0-9]?").unwrap();
     static ref STARTS_WITH_NUMBER: Regex = Regex::new(r"^[0-9]").unwrap();
 }
 
+/// Errors that this library can produce.
 #[derive(Debug)]
 pub enum OdbcAvroError {
+    /// Problem normalizing name to Avro compatible one.
     NameNormalizationError {
         orig: String,
         attempt: String,
     },
+    /// Failed to generate correct Avro schema from database schema.
     AvroSchemaError {
         odbc_schema: Vec<ColumnType>,
         avro_schema: serde_json::Value,
         err: String,
     },
+    /// Error accessing data set datum.
     DatumAccessError(DatumAccessError),
+    /// Error accessing data set row.
     DataAccessError(DataAccessError),
+    /// Problem writing Avro data.
     WriteError(String),
 }
 
@@ -93,7 +101,7 @@ impl Error for OdbcAvroError {
     }
 }
 
-/// Represents valid Avro Name as defined by standard
+/// Represents valid Avro Name as defined by standard.
 #[derive(Debug)]
 pub struct AvroName<'i>(Cow<'i, str>);
 
@@ -104,13 +112,39 @@ impl fmt::Display for AvroName<'_> {
 }
 
 impl<'i> AvroName<'i> {
-    pub fn new_strict(name: impl Into<Cow<'i, str>>) -> Result<AvroName<'i>, OdbcAvroError> {
+    /// Creates Avro compatible name
+    pub fn new(name: impl Into<Cow<'i, str>>) -> Result<AvroName<'i>, OdbcAvroError> {
+        let orig: Cow<str> = name.into();
+        if Self::is_avro_name(&orig) {
+            return Ok(AvroName(orig));
+        }
+
+        let name = SPLIT_AVRO_NAME
+            .captures_iter(&orig)
+            .flat_map(|m| m.get(1))
+            .map(|m| m.as_str().to_string())
+            .skip_while(|m| STARTS_WITH_NUMBER.is_match(m))
+            .collect::<Vec<_>>()
+            .join("_");
+
+        if !Self::is_avro_name(&name) {
+            return Err(OdbcAvroError::NameNormalizationError {
+                orig: orig.into_owned(),
+                attempt: name,
+            });
+        }
+
+        Ok(AvroName(Cow::Owned(name)))
+    }
+
+    /// Creates Avro compatible name that is lower cased.
+    pub fn new_lower(name: impl Into<Cow<'i, str>>) -> Result<AvroName<'i>, OdbcAvroError> {
         let orig: Cow<str> = name.into();
         if Self::is_avro_name_strict(&orig) {
             return Ok(AvroName(orig));
         }
 
-        let name = SPLIT_AVRO_NAME
+        let name = SPLIT_AVRO_NAME_LOWER
             .captures_iter(&orig)
             .flat_map(|m| m.get(1))
             .map(|m| m.as_str().to_string().to_lowercase())
@@ -129,7 +163,7 @@ impl<'i> AvroName<'i> {
     }
 
     pub fn is_avro_name_strict(name: &str) -> bool {
-        IS_AVRO_NAME_STRICT.is_match(name)
+        IS_AVRO_NAME_LOWER.is_match(name)
     }
 
     pub fn is_avro_name(name: &str) -> bool {
@@ -308,7 +342,7 @@ impl TryFromRow<AvroConfiguration> for AvroRowRecord {
         // so it does not need to be recalculated for following rows.
         let column_names = if state.column_name_cache.is_empty() {
             let column_names = row.schema.iter()
-                .map(|s| AvroName::new_strict(&s.name).map(|n| n.0.into_owned()))
+                .map(|s| AvroName::new_lower(&s.name).map(|n| n.0.into_owned()))
                 .collect::<Result<Vec<String>, _>>()?;
             std::mem::replace(&mut state.column_name_cache, column_names);
             state.column_name_cache.as_slice()
@@ -365,7 +399,7 @@ impl<'h, 'c: 'h, S> AvroResultSet for ResultSet<'h, 'c, AvroRowRecord, S, AvroCo
             .schema()
             .into_iter()
             .map(|column_type| {
-                let name = AvroName::new_strict(&column_type.name)?;
+                let name = AvroName::new_lower(&column_type.name)?;
                 Ok(if column_type.nullable {
                     json!({
                     "name": name.as_str(),
@@ -383,7 +417,7 @@ impl<'h, 'c: 'h, S> AvroResultSet for ResultSet<'h, 'c, AvroRowRecord, S, AvroCo
 
         let json_schema = json!({
             "type": "record",
-            "name": AvroName::new_strict(name)?.as_str(),
+            "name": AvroName::new_lower(name)?.as_str(),
             "fields": fields
         });
 
@@ -428,26 +462,26 @@ mod test {
     #[test]
     fn test_to_avro_name() {
         assert_eq!(
-            AvroName::new_strict("21dOd#Foo.BarBaz-quixISO9823Fro21Do.324")
+            AvroName::new_lower("21dOd#Foo.BarBaz-quixISO9823Fro21Do.324")
                 .unwrap()
                 .as_str(),
             "d_od_foo_bar_baz_quix_iso9823_fro21_do_324"
         );
-        assert_eq!(AvroName::new_strict("foobar").unwrap().as_str(), "foobar");
+        assert_eq!(AvroName::new_lower("foobar").unwrap().as_str(), "foobar");
         assert_eq!(
-            AvroName::new_strict("123foobar").unwrap().as_str(),
+            AvroName::new_lower("123foobar").unwrap().as_str(),
             "foobar"
         );
         assert_eq!(
-            AvroName::new_strict("123.456foobar").unwrap().as_str(),
+            AvroName::new_lower("123.456foobar").unwrap().as_str(),
             "foobar"
         );
         assert_eq!(
-            AvroName::new_strict("cuml.pct").unwrap().as_str(),
+            AvroName::new_lower("cuml.pct").unwrap().as_str(),
             "cuml_pct"
         );
         // strict
-        assert_eq!(AvroName::new_strict("FooBar").unwrap().as_str(), "foo_bar");
+        assert_eq!(AvroName::new_lower("FooBar").unwrap().as_str(), "foo_bar");
     }
 
     #[test]
@@ -455,7 +489,7 @@ mod test {
         expected = "Failed to convert empty string to Avro Name due to: failed to convert \"\" to strict Avro Name (got as far as \"\")"
     )]
     fn test_to_avro_empty() {
-        AvroName::new_strict("").or_failed_to("convert empty string to Avro Name");
+        AvroName::new_lower("").or_failed_to("convert empty string to Avro Name");
     }
 
     #[test]
@@ -463,7 +497,7 @@ mod test {
         expected = "Failed to convert empty string to Avro Name due to: failed to convert \"12.3\" to strict Avro Name (got as far as \"\""
     )]
     fn test_to_avro_number() {
-        AvroName::new_strict("12.3").or_failed_to("convert empty string to Avro Name");
+        AvroName::new_lower("12.3").or_failed_to("convert empty string to Avro Name");
     }
 
     mod odbc {
