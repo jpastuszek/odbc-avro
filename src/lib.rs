@@ -16,6 +16,9 @@ use std::io::{Write, BufWriter};
 use std::ops::Deref;
 use std::cell::RefCell;
 
+
+//TODO: Configuration to use lower case names only
+
 lazy_static! {
     /// Avro Name as defined by standard
     static ref IS_AVRO_NAME: Regex = Regex::new("^[A-Za-z][A-Za-z0-9_]*$").unwrap();
@@ -338,7 +341,7 @@ impl TryFromRow<AvroConfiguration> for AvroRowRecord {
         let mut fields = Vec::with_capacity(row.columns() as usize);
         let mut state = row.configuration.state.borrow_mut();
 
-        // On first row generate AvroName for each column name and store in AvroConfiguration::state 
+        // On first row generate AvroName for each column name and store in AvroConfiguration::state
         // so it does not need to be recalculated for following rows.
         let column_names = if state.column_name_cache.is_empty() {
             let column_names = row.schema.iter()
@@ -363,7 +366,7 @@ impl TryFromRow<AvroConfiguration> for AvroRowRecord {
 pub trait AvroResultSet {
     /// Get `AvroSchema` object from `ResultSet` schema.
     fn avro_schema<'n>(&self, name: &'n str) -> Result<AvroSchema, OdbcAvroError>;
-        
+
     /// Write as `Avro` binary data.
     fn write_avro<'n, W: Write>(
         self,
