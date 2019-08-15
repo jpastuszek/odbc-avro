@@ -1,3 +1,33 @@
+/*!
+This Rust crate extends `odbc-iter` crate functionality with ability to query Avro Record data types and write entire `ResultSet` as Avro data stream.
+
+Example usage
+=============
+
+Write Avro data from query.
+
+```rust
+use odbc_iter::Odbc;
+use odbc_avro::{AvroConfiguration, AvroResultSet, Codec};
+
+let mut connection = Odbc::connect(&std::env::var("DB_CONNECTION_STRING").expect("no DB_CONNECTION_STRING env set")).expect("connect to database");
+
+// Configure handler with default `AvroConfiguration`.
+let mut db = connection.handle_with_configuration(AvroConfiguration::default());
+
+// For example query all table data from database.
+let data = db.query(r#"SELECT * FROM sys.tables"#).expect("query failed");
+
+// You can use `File` instead to save as Avro file or any other `Write` type.
+let mut buf = Vec::new();
+
+// Write all rows as uncompressed Avro data formatted as Record type named "result_set".
+data.write_avro(&mut buf, Codec::Null, "result_set").expect("write worked");
+
+// Now `buf` contains all rows from `sys.tables` table as serialized Avro data.
+```
+!*/
+
 pub use avro_rs::schema::Schema as AvroSchema;
 pub use avro_rs::types::Value as AvroValue;
 pub use avro_rs::{Codec, Writer};
@@ -16,9 +46,6 @@ use std::fmt;
 use std::io::{Write, BufWriter};
 use std::ops::Deref;
 use std::cell::RefCell;
-
-
-//TODO: Configuration to use lower case names only
 
 lazy_static! {
     /// Avro Name as defined by standard
@@ -151,7 +178,7 @@ impl<'i> AvroName<'i> {
             .map_err(Into::into)
     }
 
-    /// Avro Name normalizer that makes names compatible as defined by standard 
+    /// Avro Name normalizer that makes names compatible as defined by standard
     /// by replacing non alpha-numeric characters with underscore.
     pub fn default_normalizer(name: &'_ str) -> Result<Cow<'_, str>, NameNormalizationError> {
         use ensure::CheckEnsureResult::*;
@@ -772,7 +799,7 @@ mod test {
                 let mut connection =
                     Odbc::connect(&connection_string()).or_failed_to("connect to database");
                 let mut db = connection.handle_with_configuration(AvroConfiguration::default());
-                let data = db.query::<AvroRowRecord>(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
+                let data = db.query(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
 
                 let mut buf = Vec::new();
 
@@ -792,7 +819,7 @@ mod test {
                     .. Default::default()
                 };
                 let mut db = connection.handle_with_configuration(config);
-                let data = db.query::<AvroRowRecord>(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
+                let data = db.query(r#"SELECT CAST('{ "foo": 42 }' AS JSON)"#).expect("query failed");
 
                 let mut buf = Vec::new();
 
