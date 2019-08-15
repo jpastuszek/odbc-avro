@@ -274,7 +274,7 @@ pub struct AvroConfiguration {
     /// How to store timestamp columns
     pub timestamp_format: TimestampFormat,
     /// Internal state used to cache row metadata
-    pub state: RefCell<State>,
+    state: RefCell<State>,
     /// Function to normalize column names to Avro specification format
     pub name_nomralizer: for<'i> fn(&'i str) -> Result<Cow<'i, str>, NameNormalizationError>,
 }
@@ -292,11 +292,57 @@ impl Configuration for AvroConfiguration {}
 
 impl Default for AvroConfiguration {
     fn default() -> AvroConfiguration {
-        AvroConfiguration {
+        AvroConfigurationBuilder::default().build()
+    }
+}
+
+/// Builder object that allows to build `AvroConfiguration` with custom settings.
+pub struct AvroConfigurationBuilder {
+    reformat_json: Option<ReformatJson>,
+    timestamp_format: TimestampFormat,
+    name_nomralizer: for<'i> fn(&'i str) -> Result<Cow<'i, str>, NameNormalizationError>,
+}
+
+impl Default for AvroConfigurationBuilder {
+    fn default() -> AvroConfigurationBuilder {
+        AvroConfigurationBuilder {
             reformat_json: None,
             timestamp_format: TimestampFormat::DefaultString,
-            state: Default::default(),
             name_nomralizer: AvroName::default_normalizer,
+        }
+    }
+}
+
+impl AvroConfigurationBuilder {
+    /// Sets JSON reformatting options. If set to `None` JSON will be passed as string as is,
+    /// otherwise it will be parsed and formatted according to `ReformatJson`.
+    ///
+    /// Note that this is only used with `odbc-iter` columns returned as `Value::Json` variant.
+    pub fn with_reformat_json(&mut self, value: impl Into<Option<ReformatJson>>) -> &mut Self {
+        self.reformat_json = value.into();
+        self
+    }
+
+    /// Sets formatting style for `Value::Timestamp` columns according to `TimestampFormat`.
+    pub fn with_timestamp_format(&mut self, value: TimestampFormat) -> &mut Self {
+        self.timestamp_format = value;
+        self
+    }
+
+    /// Sets normalizer function that will convert database table column names to Avro compatible
+    /// record filed names.
+    pub fn with_name_nomralizer(&mut self, value: for<'i> fn(&'i str) -> Result<Cow<'i, str>, NameNormalizationError>) -> &mut Self {
+        self.name_nomralizer = value;
+        self
+    }
+
+    /// Build `AvroConfiguration` final.
+    pub fn build(self) -> AvroConfiguration {
+        AvroConfiguration {
+            reformat_json: self.reformat_json,
+            timestamp_format: self.timestamp_format,
+            name_nomralizer: self.name_nomralizer,
+            state: Default::default(),
         }
     }
 }
