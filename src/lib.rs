@@ -453,7 +453,7 @@ impl<'h, 'c: 'h, S> AvroResultSet for ResultSet<'h, 'c, AvroRowRecord, S, AvroCo
 
         let json_schema = json!({
             "type": "record",
-            "name": AvroName::new(name, AvroName::lowercase_normalizer)?.as_str(),
+            "name": AvroName::new(name, configuration.name_nomralizer)?.as_str(),
             "fields": fields
         });
 
