@@ -174,7 +174,7 @@ impl<'i> AvroName<'i> {
     }
 
     /// Avro Name normalizer to make names compatible but in addition only allowing lowercase chars so it plays well with databases
-    pub fn lowcase_normalizer(name: &'_ str) -> Result<Cow<'_, str>, NameNormalizationError> {
+    pub fn lowercase_normalizer(name: &'_ str) -> Result<Cow<'_, str>, NameNormalizationError> {
         use ensure::CheckEnsureResult::*;
         ensure(move || {
             Ok(if IS_AVRO_NAME_LOWER.is_match(name) {
@@ -378,7 +378,7 @@ impl TryFromRow<AvroConfiguration> for AvroRowRecord {
         // so it does not need to be recalculated for following rows.
         let column_names = if state.column_name_cache.is_empty() {
             let column_names = row.schema.iter()
-                .map(|s| AvroName::new(&s.name, AvroName::lowcase_normalizer).map(|n| n.0.into_owned()))
+                .map(|s| AvroName::new(&s.name, AvroName::lowercase_normalizer).map(|n| n.0.into_owned()))
                 .collect::<Result<Vec<String>, _>>()?;
             std::mem::replace(&mut state.column_name_cache, column_names);
             state.column_name_cache.as_slice()
@@ -435,7 +435,7 @@ impl<'h, 'c: 'h, S> AvroResultSet for ResultSet<'h, 'c, AvroRowRecord, S, AvroCo
             .schema()
             .into_iter()
             .map(|column_type| {
-                let name = AvroName::new(&column_type.name, AvroName::lowcase_normalizer)?;
+                let name = AvroName::new(&column_type.name, AvroName::lowercase_normalizer)?;
                 Ok(if column_type.nullable {
                     json!({
                     "name": name.as_str(),
@@ -453,7 +453,7 @@ impl<'h, 'c: 'h, S> AvroResultSet for ResultSet<'h, 'c, AvroRowRecord, S, AvroCo
 
         let json_schema = json!({
             "type": "record",
-            "name": AvroName::new(name, AvroName::lowcase_normalizer)?.as_str(),
+            "name": AvroName::new(name, AvroName::lowercase_normalizer)?.as_str(),
             "fields": fields
         });
 
@@ -498,26 +498,26 @@ mod test {
     #[test]
     fn test_to_avro_name() {
         assert_eq!(
-            AvroName::new("21dOd#Foo.BarBaz-quixISO9823Fro21Do.324", AvroName::lowcase_normalizer)
+            AvroName::new("21dOd#Foo.BarBaz-quixISO9823Fro21Do.324", AvroName::lowercase_normalizer)
                 .unwrap()
                 .as_str(),
             "d_od_foo_bar_baz_quix_iso9823_fro21_do_324"
         );
-        assert_eq!(AvroName::new("foobar", AvroName::lowcase_normalizer).unwrap().as_str(), "foobar");
+        assert_eq!(AvroName::new("foobar", AvroName::lowercase_normalizer).unwrap().as_str(), "foobar");
         assert_eq!(
-            AvroName::new("123foobar", AvroName::lowcase_normalizer).unwrap().as_str(),
+            AvroName::new("123foobar", AvroName::lowercase_normalizer).unwrap().as_str(),
             "foobar"
         );
         assert_eq!(
-            AvroName::new("123.456foobar", AvroName::lowcase_normalizer).unwrap().as_str(),
+            AvroName::new("123.456foobar", AvroName::lowercase_normalizer).unwrap().as_str(),
             "foobar"
         );
         assert_eq!(
-            AvroName::new("cuml.pct", AvroName::lowcase_normalizer).unwrap().as_str(),
+            AvroName::new("cuml.pct", AvroName::lowercase_normalizer).unwrap().as_str(),
             "cuml_pct"
         );
         // strict
-        assert_eq!(AvroName::new("FooBar", AvroName::lowcase_normalizer).unwrap().as_str(), "foo_bar");
+        assert_eq!(AvroName::new("FooBar", AvroName::lowercase_normalizer).unwrap().as_str(), "foo_bar");
     }
 
     #[test]
@@ -525,7 +525,7 @@ mod test {
         expected = "Failed to convert empty string to Avro Name due to: problem normalizing name; caused by: failed to convert \"\" to strict Avro Name (got as far as \"\")"
     )]
     fn test_to_avro_empty() {
-        AvroName::new("", AvroName::lowcase_normalizer).or_failed_to("convert empty string to Avro Name");
+        AvroName::new("", AvroName::lowercase_normalizer).or_failed_to("convert empty string to Avro Name");
     }
 
     #[test]
@@ -533,7 +533,7 @@ mod test {
         expected = "Failed to convert empty string to Avro Name due to: problem normalizing name; caused by: failed to convert \"12.3\" to strict Avro Name (got as far as \"\")"
     )]
     fn test_to_avro_number() {
-        AvroName::new("12.3", AvroName::lowcase_normalizer).or_failed_to("convert empty string to Avro Name");
+        AvroName::new("12.3", AvroName::lowercase_normalizer).or_failed_to("convert empty string to Avro Name");
     }
 
     mod odbc {
