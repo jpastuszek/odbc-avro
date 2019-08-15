@@ -9,6 +9,7 @@ use odbc_iter::{
 use regex::Regex;
 use serde_json::json;
 use chrono::NaiveDate;
+use ensure::{Ensure, Meet};
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
@@ -36,10 +37,7 @@ lazy_static! {
 #[derive(Debug)]
 pub enum OdbcAvroError {
     /// Problem normalizing name to Avro compatible one.
-    NameNormalizationError {
-        orig: String,
-        attempt: String,
-    },
+    NameNormalizationError(NameNormalizationError),
     /// Failed to generate correct Avro schema from database schema.
     AvroSchemaError {
         odbc_schema: Vec<ColumnType>,
@@ -57,11 +55,7 @@ pub enum OdbcAvroError {
 impl fmt::Display for OdbcAvroError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            OdbcAvroError::NameNormalizationError { orig, attempt } => write!(
-                f,
-                "failed to convert {:?} to strict Avro Name (got as far as {:?})",
-                orig, attempt
-            ),
+            OdbcAvroError::NameNormalizationError(_) => write!(f, "problem normalizing name"),
             OdbcAvroError::AvroSchemaError {
                 odbc_schema,
                 avro_schema,
@@ -92,17 +86,41 @@ impl From<DataAccessError> for OdbcAvroError {
     }
 }
 
+impl From<NameNormalizationError> for OdbcAvroError {
+    fn from(err: NameNormalizationError) -> OdbcAvroError {
+        OdbcAvroError::NameNormalizationError(err)
+    }
+}
+
 impl Error for OdbcAvroError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            OdbcAvroError::NameNormalizationError { .. }
-            | OdbcAvroError::AvroSchemaError { .. }
+            OdbcAvroError::AvroSchemaError { .. }
             | OdbcAvroError::WriteError { .. } => None,
+            OdbcAvroError::NameNormalizationError(err) => Some(err),
             OdbcAvroError::DatumAccessError(err) => Some(err),
             OdbcAvroError::DataAccessError(err) => Some(err),
         }
     }
 }
+
+#[derive(Debug)]
+pub struct NameNormalizationError {
+    orig: String,
+    attempt: String,
+}
+
+impl fmt::Display for NameNormalizationError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "failed to convert {:?} to strict Avro Name (got as far as {:?})",
+            self.orig, self.attempt
+        )
+    }
+}
+
+impl Error for NameNormalizationError {}
 
 /// Represents valid Avro Name as defined by standard.
 #[derive(Debug)]
@@ -115,57 +133,75 @@ impl fmt::Display for AvroName<'_> {
 }
 
 impl<'i> AvroName<'i> {
-    /// Creates Avro compatible name
-    pub fn new(name: impl Into<Cow<'i, str>>) -> Result<AvroName<'i>, OdbcAvroError> {
-        let orig: Cow<str> = name.into();
-        if Self::is_avro_name(&orig) {
-            return Ok(AvroName(orig));
-        }
-
-        let name = SPLIT_AVRO_NAME
-            .captures_iter(&orig)
-            .flat_map(|m| m.get(1))
-            .map(|m| m.as_str().to_string())
-            .skip_while(|m| STARTS_WITH_NUMBER.is_match(m))
-            .collect::<Vec<_>>()
-            .join("_");
-
-        if !Self::is_avro_name(&name) {
-            return Err(OdbcAvroError::NameNormalizationError {
-                orig: orig.into_owned(),
-                attempt: name,
-            });
-        }
-
-        Ok(AvroName(Cow::Owned(name)))
+    pub fn new<F, E, M, N>(name: N, ensure: F) -> Result<AvroName<'i>, OdbcAvroError> 
+    where 
+        N: Into<Cow<'i, str>>,
+        F: FnOnce(Cow<'i, str>) -> E,
+        E: Ensure<Cow<'i, str>, EnsureAction = M>, 
+        M: Meet<Met = Cow<'i, str>, Error = NameNormalizationError>
+    {
+        ensure(name.into()).ensure().map(AvroName).map_err(Into::into)
     }
 
-    /// Creates Avro compatible name that is lower cased.
-    pub fn new_lower(name: impl Into<Cow<'i, str>>) -> Result<AvroName<'i>, OdbcAvroError> {
-        let orig: Cow<str> = name.into();
-        if Self::is_avro_name_strict(&orig) {
-            return Ok(AvroName(orig));
+    /// Provides Avro Name normalizer that makes names compatible as defined by standard
+    pub fn default_normalization(name: Cow<'i, str>) -> impl Ensure<Cow<'i, str>, EnsureAction = impl Meet<Met = Cow<'i, str>, Error = NameNormalizationError>> {
+        use ensure::CheckEnsureResult::*;
+        move || {
+            Ok(if IS_AVRO_NAME.is_match(&name) {
+                Met(name)
+            } else {
+                EnsureAction(move || {
+                    let normal_name = SPLIT_AVRO_NAME
+                        .captures_iter(&name)
+                        .flat_map(|m| m.get(1))
+                        .map(|m| m.as_str().to_string().to_lowercase())
+                        .skip_while(|m| STARTS_WITH_NUMBER.is_match(m))
+                        .collect::<Vec<_>>()
+                        .join("_");
+
+                    if IS_AVRO_NAME.is_match(&normal_name) {
+                        Ok(normal_name.into())
+                    } else {
+                        Err(NameNormalizationError {
+                            orig: name.into_owned(),
+                            attempt: normal_name,
+                        })
+                    }
+                })
+            })
         }
-
-        let name = SPLIT_AVRO_NAME_LOWER
-            .captures_iter(&orig)
-            .flat_map(|m| m.get(1))
-            .map(|m| m.as_str().to_string().to_lowercase())
-            .skip_while(|m| STARTS_WITH_NUMBER.is_match(m))
-            .collect::<Vec<_>>()
-            .join("_");
-
-        if !Self::is_avro_name_strict(&name) {
-            return Err(OdbcAvroError::NameNormalizationError {
-                orig: orig.into_owned(),
-                attempt: name,
-            });
-        }
-
-        Ok(AvroName(Cow::Owned(name)))
     }
 
-    pub fn is_avro_name_strict(name: &str) -> bool {
+    /// Provides Avro Name normalizer to make names compatible but in addition only allowing lowercase chars so it plays well with databases
+    pub fn lowcase_normalization(name: Cow<'i, str>) -> impl Ensure<Cow<'i, str>, EnsureAction = impl Meet<Met = Cow<'i, str>, Error = NameNormalizationError>> {
+        use ensure::CheckEnsureResult::*;
+        move || {
+            Ok(if IS_AVRO_NAME_LOWER.is_match(&name) {
+                Met(name)
+            } else {
+                EnsureAction(move || {
+                    let normal_name = SPLIT_AVRO_NAME_LOWER
+                        .captures_iter(&name)
+                        .flat_map(|m| m.get(1))
+                        .map(|m| m.as_str().to_string().to_lowercase())
+                        .skip_while(|m| STARTS_WITH_NUMBER.is_match(m))
+                        .collect::<Vec<_>>()
+                        .join("_");
+
+                    if IS_AVRO_NAME_LOWER.is_match(&normal_name) {
+                        Ok(normal_name.into())
+                    } else {
+                        Err(NameNormalizationError {
+                            orig: name.into_owned(),
+                            attempt: normal_name,
+                        })
+                    }
+                })
+            })
+        }
+    }
+
+    pub fn is_avro_name_lower(name: &str) -> bool {
         IS_AVRO_NAME_LOWER.is_match(name)
     }
 
@@ -227,6 +263,7 @@ pub struct AvroConfiguration {
     pub timestamp_format: TimestampFormat,
     /// Internal state used to cache row metadata
     pub state: RefCell<State>,
+    //pub name_nomralizer: Box<dyn for<'i> FnOnce(Cow<'i, str>) -> impl Ensure<Cow<'i, str>, EnsureAction = impl Meet<Met = Cow<'i, str>, Error = NameNormalizationError>>>,
 }
 
 impl Configuration for AvroConfiguration {}
@@ -345,7 +382,7 @@ impl TryFromRow<AvroConfiguration> for AvroRowRecord {
         // so it does not need to be recalculated for following rows.
         let column_names = if state.column_name_cache.is_empty() {
             let column_names = row.schema.iter()
-                .map(|s| AvroName::new_lower(&s.name).map(|n| n.0.into_owned()))
+                .map(|s| AvroName::new(&s.name, AvroName::lowcase_normalization).map(|n| n.0.into_owned()))
                 .collect::<Result<Vec<String>, _>>()?;
             std::mem::replace(&mut state.column_name_cache, column_names);
             state.column_name_cache.as_slice()
@@ -402,7 +439,7 @@ impl<'h, 'c: 'h, S> AvroResultSet for ResultSet<'h, 'c, AvroRowRecord, S, AvroCo
             .schema()
             .into_iter()
             .map(|column_type| {
-                let name = AvroName::new_lower(&column_type.name)?;
+                let name = AvroName::new(&column_type.name, AvroName::lowcase_normalization)?;
                 Ok(if column_type.nullable {
                     json!({
                     "name": name.as_str(),
@@ -420,7 +457,7 @@ impl<'h, 'c: 'h, S> AvroResultSet for ResultSet<'h, 'c, AvroRowRecord, S, AvroCo
 
         let json_schema = json!({
             "type": "record",
-            "name": AvroName::new_lower(name)?.as_str(),
+            "name": AvroName::new(name, AvroName::lowcase_normalization)?.as_str(),
             "fields": fields
         });
 
@@ -465,42 +502,42 @@ mod test {
     #[test]
     fn test_to_avro_name() {
         assert_eq!(
-            AvroName::new_lower("21dOd#Foo.BarBaz-quixISO9823Fro21Do.324")
+            AvroName::new("21dOd#Foo.BarBaz-quixISO9823Fro21Do.324", AvroName::lowcase_normalization)
                 .unwrap()
                 .as_str(),
             "d_od_foo_bar_baz_quix_iso9823_fro21_do_324"
         );
-        assert_eq!(AvroName::new_lower("foobar").unwrap().as_str(), "foobar");
+        assert_eq!(AvroName::new("foobar", AvroName::lowcase_normalization).unwrap().as_str(), "foobar");
         assert_eq!(
-            AvroName::new_lower("123foobar").unwrap().as_str(),
+            AvroName::new("123foobar", AvroName::lowcase_normalization).unwrap().as_str(),
             "foobar"
         );
         assert_eq!(
-            AvroName::new_lower("123.456foobar").unwrap().as_str(),
+            AvroName::new("123.456foobar", AvroName::lowcase_normalization).unwrap().as_str(),
             "foobar"
         );
         assert_eq!(
-            AvroName::new_lower("cuml.pct").unwrap().as_str(),
+            AvroName::new("cuml.pct", AvroName::lowcase_normalization).unwrap().as_str(),
             "cuml_pct"
         );
         // strict
-        assert_eq!(AvroName::new_lower("FooBar").unwrap().as_str(), "foo_bar");
+        assert_eq!(AvroName::new("FooBar", AvroName::lowcase_normalization).unwrap().as_str(), "foo_bar");
     }
 
     #[test]
     #[should_panic(
-        expected = "Failed to convert empty string to Avro Name due to: failed to convert \"\" to strict Avro Name (got as far as \"\")"
+        expected = "Failed to convert empty string to Avro Name due to: problem normalizing name; caused by: failed to convert \"\" to strict Avro Name (got as far as \"\")"
     )]
     fn test_to_avro_empty() {
-        AvroName::new_lower("").or_failed_to("convert empty string to Avro Name");
+        AvroName::new("", AvroName::lowcase_normalization).or_failed_to("convert empty string to Avro Name");
     }
 
     #[test]
     #[should_panic(
-        expected = "Failed to convert empty string to Avro Name due to: failed to convert \"12.3\" to strict Avro Name (got as far as \"\""
+        expected = "Failed to convert empty string to Avro Name due to: problem normalizing name; caused by: failed to convert \"12.3\" to strict Avro Name (got as far as \"\")"
     )]
     fn test_to_avro_number() {
-        AvroName::new_lower("12.3").or_failed_to("convert empty string to Avro Name");
+        AvroName::new("12.3", AvroName::lowcase_normalization).or_failed_to("convert empty string to Avro Name");
     }
 
     mod odbc {
