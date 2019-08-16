@@ -2,6 +2,11 @@
 name = "odbc-avro"
 version = "0.1.0"
 authors = ["Jakub Pastuszek <jpastuszek@protonmail.com>"]
+description = "Extends odbc-iter crate functionality with ability to query Avro records and write entire ResultSet as Avro Object Container File data."
+readme = "README.md"
+keywords = ["odbc", "orm", "database", "avro"]
+categories = ["database"]
+license = "MIT"
 edition = "2018"
 
 [dependencies]
