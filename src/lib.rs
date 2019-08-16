@@ -480,8 +480,6 @@ impl TryFromRow<AvroConfiguration> for AvroRowRecord {
     }
 }
 
-//TODO: write_avro should work for all iterators of `AvroRowRecord` so data can be processed
-
 /// Extension functions for `ResultSet`.
 pub trait AvroResultSet {
     /// Crates `AvroSchema` object from `ResultSet` schema.
@@ -493,6 +491,17 @@ pub trait AvroResultSet {
         writer: &mut W,
         codec: Codec,
         name: &'n str,
+    ) -> Result<usize, OdbcAvroError>;
+}
+
+/// Extension functions for iterators of `AvroRowRecord` items.
+pub trait AvroRowRecordIter {
+    /// Writes all records as Avro "Object Container File" data.
+    fn collect_avro<'n, W: Write>(
+        self,
+        avro_schema: &AvroSchema,
+        writer: &mut W,
+        codec: Codec
     ) -> Result<usize, OdbcAvroError>;
 }
 
@@ -552,13 +561,24 @@ impl<'h, 'c: 'h, S> AvroResultSet for ResultSet<'h, 'c, AvroRowRecord, S, AvroCo
     }
 
     fn write_avro<'n, W: Write>(
-        mut self,
+        self,
         writer: &mut W,
         codec: Codec,
         name: &'n str,
     ) -> Result<usize, OdbcAvroError> {
-        let stdout = BufWriter::new(writer);
         let avro_schema = self.avro_schema(name)?;
+        self.collect_avro(&avro_schema, writer, codec)
+    }
+}
+
+impl<I> AvroRowRecordIter for I where I: Iterator<Item = Result<AvroRowRecord, DataAccessError>> {
+    fn collect_avro<'n, W: Write>(
+        mut self,
+        avro_schema: &AvroSchema,
+        writer: &mut W,
+        codec: Codec
+    ) -> Result<usize, OdbcAvroError> {
+        let stdout = BufWriter::new(writer);
         let mut writer = Writer::with_codec(&avro_schema, stdout, codec);
 
         Ok(self
