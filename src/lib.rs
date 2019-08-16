@@ -1,10 +1,10 @@
 /*!
-This Rust crate extends `odbc-iter` crate functionality with ability to query Avro Record data types and write entire `ResultSet` as Avro data stream.
+This Rust crate extends `odbc-iter` crate functionality with ability to query Avro records and write entire `ResultSet` as Avro "Object Container File" data.
 
 Example usage
 =============
 
-Write Avro data from query.
+Write Avro object container file data from query.
 
 ```rust
 use odbc_iter::Odbc;
@@ -18,13 +18,13 @@ let mut db = connection.handle_with_configuration(AvroConfiguration::default());
 // For example query all table data from database.
 let data = db.query(r#"SELECT * FROM sys.tables"#).expect("query failed");
 
-// You can use `File` instead to save as Avro file or any other `Write` type.
+// You can use `File` instead to write Avro object container file or any other `Write` type.
 let mut buf = Vec::new();
 
-// Write all rows as uncompressed Avro data formatted as Record type named "result_set".
+// Write all rows as uncompressed Avro object container file where rows are represented as record object named "result_set".
 data.write_avro(&mut buf, Codec::Null, "result_set").expect("write worked");
 
-// Now `buf` contains all rows from `sys.tables` table as serialized Avro data.
+// Now `buf` contains all rows from `sys.tables` table serialized Avro object container file.
 ```
 !*/
 
@@ -149,7 +149,7 @@ impl fmt::Display for NameNormalizationError {
 
 impl Error for NameNormalizationError {}
 
-/// Represents valid Avro Name as defined by standard.
+/// Represents valid Avro name as defined by standard.
 #[derive(Debug)]
 pub struct AvroName<'i>(Cow<'i, str>);
 
@@ -160,7 +160,7 @@ impl fmt::Display for AvroName<'_> {
 }
 
 impl<'i> AvroName<'i> {
-    /// Crates AvroName from given string ensuring that it is compatible with Avro specification
+    /// Crates `AvroName` from given string ensuring that it is compatible with Avro specification
     /// using normalization function.
     pub fn new(name: &'i str, normalizer: fn(&'i str) -> Result<Cow<'i, str>, NameNormalizationError>) -> Result<AvroName<'i>, OdbcAvroError> {
         let name = name.into();
@@ -178,7 +178,7 @@ impl<'i> AvroName<'i> {
             .map_err(Into::into)
     }
 
-    /// Avro Name normalizer that makes names compatible as defined by standard
+    /// Avro name normalizer that makes names compatible as defined by standard
     /// by replacing non alpha-numeric characters with underscore.
     pub fn default_normalizer(name: &'_ str) -> Result<Cow<'_, str>, NameNormalizationError> {
         use ensure::CheckEnsureResult::*;
@@ -200,7 +200,7 @@ impl<'i> AvroName<'i> {
         })
     }
 
-    /// Avro Name normalizer to make names compatible but in addition only allowing lowercase chars so it plays well with databases
+    /// Avro name normalizer based on `default_normalizer` but in addition changing characters to lowcase/snakecase form so it plays well with databases.
     pub fn lowercase_normalizer(name: &'_ str) -> Result<Cow<'_, str>, NameNormalizationError> {
         use ensure::CheckEnsureResult::*;
         ensure(move || {
@@ -234,28 +234,28 @@ impl<'i> Deref for AvroName<'i> {
     }
 }
 
-/// How JSON column data is reformatted
+/// Specification of JSON column data is reformatted.
 #[derive(Debug, Clone)]
 pub enum ReformatJson {
-    /// Strip spaces and new lines
+    /// Strip spaces and new lines.
     Compact,
-    /// Indented for readability
+    /// Indented for readability.
     Pretty,
 }
 
-/// In what format TIMESTAMP columns should be stored in the output
+/// Specification of TIMESTAMP column representation.
 #[derive(Debug, Clone)]
 pub enum TimestampFormat {
-    /// As `String` in format: Y-M-D H:M:S.fff
+    /// As `String` in format: "Y-M-D H:M:S.fff"
     DefaultString,
     /// As `i64` number of milliseconds since epoch
     MillisecondsSinceEpoch,
 }
 
-/// Internal state used to cache row metadata
+/// Internal state used to cache row metadata.
 #[derive(Debug, Default)]
 pub struct State {
-    /// AvroName compatible column names
+    /// Cache of `AvroName` field names.
     column_name_cache: Vec<String>,
 }
 
@@ -266,16 +266,16 @@ impl Clone for State {
     }
 }
 
-/// Default configuration with no JSON reformatting and storing timestamp as String
+/// ODBC to Avor record processing configuration and internal state.
 #[derive(Clone)]
 pub struct AvroConfiguration {
-    /// How to process JSON columns
+    /// How to process JSON columns.
     pub reformat_json: Option<ReformatJson>,
-    /// How to store timestamp columns
+    /// How to store TIMESTAMP columns.
     pub timestamp_format: TimestampFormat,
-    /// Internal state used to cache row metadata
+    /// Internal state used to cache row metadata.
     state: RefCell<State>,
-    /// Function to normalize column names to Avro specification format
+    /// Function to normalize column names to Avro compatible field names.
     pub name_nomralizer: for<'i> fn(&'i str) -> Result<Cow<'i, str>, NameNormalizationError>,
 }
 
@@ -296,7 +296,7 @@ impl Default for AvroConfiguration {
     }
 }
 
-/// Builder object that allows to build `AvroConfiguration` with custom settings.
+/// Helper object that allows to build `AvroConfiguration` with custom settings.
 pub struct AvroConfigurationBuilder {
     reformat_json: Option<ReformatJson>,
     timestamp_format: TimestampFormat,
@@ -314,16 +314,26 @@ impl Default for AvroConfigurationBuilder {
 }
 
 impl AvroConfigurationBuilder {
-    /// Sets JSON reformatting options. If set to `None` JSON will be passed as string as is,
-    /// otherwise it will be parsed and formatted according to `ReformatJson`.
+    /// Sets reformatting options JSON columns.
     ///
-    /// Note that this is only used with `odbc-iter` columns returned as `Value::Json` variant.
+    /// If set to `None` JSON will be passed as a `String` as is, otherwise it will be parsed and formatted according to `ReformatJson` variant.
+    ///
+    /// Default: `None`.
+    ///
+    /// Note that this only applies to `odbc-iter` columns represented as `Value::Json` variant.
     pub fn with_reformat_json(&mut self, value: impl Into<Option<ReformatJson>>) -> &mut Self {
         self.reformat_json = value.into();
         self
     }
 
-    /// Sets formatting style for `Value::Timestamp` columns according to `TimestampFormat`.
+    /// Sets formatting style for TIMESTAMP columns.
+    ///
+    /// Avro format cannot store native ODBC TIMESTAMP column values so they need to be processed
+    /// according with `TimestampFormat` variant.
+    ///
+    /// Default: `TimestampFormat::DefaultString`.
+    ///
+    /// Note that this only applies to `odbc-iter` columns represented as `Value::Timestamp` variant.
     pub fn with_timestamp_format(&mut self, value: TimestampFormat) -> &mut Self {
         self.timestamp_format = value;
         self
@@ -331,12 +341,14 @@ impl AvroConfigurationBuilder {
 
     /// Sets normalizer function that will convert database table column names to Avro compatible
     /// record filed names.
+    ///
+    /// Default: `AvroName::default_normalizer`
     pub fn with_name_nomralizer(&mut self, value: for<'i> fn(&'i str) -> Result<Cow<'i, str>, NameNormalizationError>) -> &mut Self {
         self.name_nomralizer = value;
         self
     }
 
-    /// Build `AvroConfiguration` final.
+    /// Builds final `AvroConfiguration`.
     pub fn build(self) -> AvroConfiguration {
         AvroConfiguration {
             reformat_json: self.reformat_json,
@@ -347,7 +359,7 @@ impl AvroConfigurationBuilder {
     }
 }
 
-/// Table column represented as AvroValue
+/// Table column represented as `AvroValue`.
 #[derive(Debug)]
 pub struct AvroColumn(pub AvroValue);
 
@@ -436,7 +448,7 @@ impl TryFromColumn<AvroConfiguration> for AvroColumn {
     }
 }
 
-/// Table row represented as Avro record
+/// Table row represented as `AvroValue::Record`.
 #[derive(Debug)]
 pub struct AvroRowRecord(AvroValue);
 
@@ -468,12 +480,14 @@ impl TryFromRow<AvroConfiguration> for AvroRowRecord {
     }
 }
 
-/// Extension function for `ResultSet`.
+//TODO: write_avro should work for all iterators of `AvroRowRecord` so data can be processed
+
+/// Extension functions for `ResultSet`.
 pub trait AvroResultSet {
-    /// Get `AvroSchema` object from `ResultSet` schema.
+    /// Crates `AvroSchema` object from `ResultSet` schema.
     fn avro_schema<'n>(&self, name: &'n str) -> Result<AvroSchema, OdbcAvroError>;
 
-    /// Write as `Avro` binary data.
+    /// Writes all rows as Avro "Object Container File" data.
     fn write_avro<'n, W: Write>(
         self,
         writer: &mut W,
