@@ -1,3 +1,5 @@
+[![Latest Version]][crates.io] [![Documentation]][docs.rs] ![License]
+
 This Rust crate extends `odbc-iter` crate functionality with ability to query Avro records and write entire `ResultSet` as Avro "Object Container File" data.
 
 Example usage
@@ -25,3 +27,9 @@ data.write_avro(&mut buf, Codec::Null, "result_set").expect("write worked");
 
 // Now `buf` contains all rows from `sys.tables` table serialized Avro object container file.
 ```
+
+[crates.io]: https://crates.io/crates/odbc-avro
+[Latest Version]: https://img.shields.io/crates/v/odbc-avro.svg
+[Documentation]: https://docs.rs/odbc-avro/badge.svg
+[docs.rs]: https://docs.rs/odbc-avro
+[License]: https://img.shields.io/crates/l/odbc-avro.svg
