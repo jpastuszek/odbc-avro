@@ -321,7 +321,7 @@ impl AvroConfigurationBuilder {
     /// Default: `None`.
     ///
     /// Note that this only applies to `odbc-iter` columns represented as `Value::Json` variant.
-    pub fn with_reformat_json(&mut self, value: impl Into<Option<ReformatJson>>) -> &mut Self {
+    pub fn with_reformat_json(mut self, value: impl Into<Option<ReformatJson>>) -> Self {
         self.reformat_json = value.into();
         self
     }
@@ -334,7 +334,7 @@ impl AvroConfigurationBuilder {
     /// Default: `TimestampFormat::DefaultString`.
     ///
     /// Note that this only applies to `odbc-iter` columns represented as `Value::Timestamp` variant.
-    pub fn with_timestamp_format(&mut self, value: TimestampFormat) -> &mut Self {
+    pub fn with_timestamp_format(mut self, value: TimestampFormat) -> Self {
         self.timestamp_format = value;
         self
     }
@@ -343,7 +343,7 @@ impl AvroConfigurationBuilder {
     /// record filed names.
     ///
     /// Default: `AvroName::default_normalizer`
-    pub fn with_name_nomralizer(&mut self, value: for<'i> fn(&'i str) -> Result<Cow<'i, str>, NameNormalizationError>) -> &mut Self {
+    pub fn with_name_nomralizer(mut self, value: for<'i> fn(&'i str) -> Result<Cow<'i, str>, NameNormalizationError>) -> Self {
         self.name_nomralizer = value;
         self
     }
