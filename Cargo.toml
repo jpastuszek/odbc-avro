@@ -1,6 +1,6 @@
 [package]
 name = "odbc-avro"
-version = "0.2.1"
+version = "0.2.2-alpha.0"
 authors = ["Jakub Pastuszek <jpastuszek@protonmail.com>"]
 description = "Extends odbc-iter crate functionality with ability to query Avro records and write entire ResultSet as Avro Object Container File data."
 repository = "https://github.com/jpastuszek/odbc-avro"
