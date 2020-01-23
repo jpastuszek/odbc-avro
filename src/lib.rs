@@ -383,6 +383,8 @@ impl TryFromColumn<AvroConfiguration> for AvroColumn {
                 Bigint => column.into_i64()?.map(AvroValue::Long),
                 Float => column.into_f32()?.map(AvroValue::Float),
                 Double => column.into_f64()?.map(AvroValue::Double),
+                #[cfg(feature = "decimal")]
+                Decimal => column.into_decimal()?.as_ref().map(ToString::to_string).map(AvroValue::String),
                 String => column.into_string()?.map(AvroValue::String),
                 Json => {
                     match reformat_json {
@@ -515,6 +517,8 @@ impl<'h, 'c: 'h, S> AvroResultSet for ResultSet<'h, 'c, AvroRowRecord, S, AvroCo
                 Bigint => "long",
                 Float => "float",
                 Double => "double",
+                #[cfg(feature = "decimal")]
+                Decimal => "string",
                 String => "string",
                 Json => "string",
                 Timestamp => match configuration.timestamp_format {
